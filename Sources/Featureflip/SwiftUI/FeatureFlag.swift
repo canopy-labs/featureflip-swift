@@ -13,17 +13,18 @@ import SwiftUI
 ///     }
 /// }
 /// ```
+///
+/// Requires a `FeatureFlagProvider` to be injected via `.environmentObject(client.flagProvider)`.
 @propertyWrapper
 public struct FeatureFlag: DynamicProperty {
     private let key: String
     private let defaultValue: Bool
 
-    @ObservedObject private var provider: FeatureFlagProvider
+    @EnvironmentObject private var provider: FeatureFlagProvider
 
     public init(wrappedValue defaultValue: Bool, _ key: String) {
         self.key = key
         self.defaultValue = defaultValue
-        self.provider = FeatureflipClient.shared.flagProvider
     }
 
     public var wrappedValue: Bool {

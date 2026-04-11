@@ -3,6 +3,6 @@ import XCTest
 
 final class FeatureflipTests: XCTestCase {
     func testVersion() {
-        XCTAssertEqual(FeatureflipClient.version, "0.1.0")
+        XCTAssertEqual(FeatureflipClient.version, "2.0.0")
     }
 }

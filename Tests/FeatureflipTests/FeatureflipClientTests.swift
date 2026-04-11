@@ -3,9 +3,14 @@ import XCTest
 
 final class FeatureflipClientTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        _resetForTesting()
+    }
+
     override func tearDown() {
+        _resetForTesting()
         super.tearDown()
-        FeatureflipClient._shared = nil
     }
 
     // MARK: - Helpers

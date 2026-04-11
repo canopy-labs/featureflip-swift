@@ -18,14 +18,12 @@ final class MockHTTPLoader: HTTPDataLoader, @unchecked Sendable {
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        lock.lock()
-        capturedRequests.append(request)
-        guard !responses.isEmpty else {
-            lock.unlock()
-            throw URLError(.badServerResponse)
+        try lock.withLock {
+            capturedRequests.append(request)
+            guard !responses.isEmpty else {
+                throw URLError(.badServerResponse)
+            }
+            return responses.removeFirst()
         }
-        let response = responses.removeFirst()
-        lock.unlock()
-        return response
     }
 }

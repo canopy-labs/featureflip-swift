@@ -10,7 +10,7 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/canopy-labs/featureflip-swift", from: "1.0.0")
+    .package(url: "https://github.com/canopy-labs/featureflip-swift", from: "2.0.0")
 ]
 ```
 
@@ -48,15 +48,6 @@ let config = FeatureflipConfig(
     flushBatchSize: 100,                           // Events per batch
     initTimeout: 10                                // Max seconds to wait for initialization
 )
-```
-
-## Singleton Pattern
-
-```swift
-FeatureflipClient.configure(config: config)
-
-// Access from anywhere
-let enabled = FeatureflipClient.shared.boolVariation("my-feature", default: false)
 ```
 
 ## Evaluation
@@ -131,7 +122,7 @@ client.boolVariation("unknown", default: false)         // false (default)
 - **Event tracking** - Automatic batching and background flushing
 - **Test support** - `forTesting()` factory for deterministic unit tests
 - **SwiftUI support** - `FeatureFlagProvider` for reactive flag values
-- **Singleton or instance** - `configure`/`shared` pattern or manual instantiation
+- **Singleton-by-construction** - Same `clientKey` shares one refcounted core
 
 ## Platforms
 

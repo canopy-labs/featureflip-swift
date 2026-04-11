@@ -1,28 +1,32 @@
 import XCTest
 @testable import Featureflip
 
+private final class Flag: @unchecked Sendable {
+    var value = false
+}
+
 final class LifecycleObserverTests: XCTestCase {
     func testForegroundCallsHandler() {
-        var foregroundCalled = false
-        var backgroundCalled = false
+        let foregroundCalled = Flag()
+        let backgroundCalled = Flag()
         let observer = LifecycleObserver(
-            onForeground: { foregroundCalled = true },
-            onBackground: { backgroundCalled = true }
+            onForeground: { foregroundCalled.value = true },
+            onBackground: { backgroundCalled.value = true }
         )
         observer.simulateForeground()
-        XCTAssertTrue(foregroundCalled)
-        XCTAssertFalse(backgroundCalled)
+        XCTAssertTrue(foregroundCalled.value)
+        XCTAssertFalse(backgroundCalled.value)
     }
 
     func testBackgroundCallsHandler() {
-        var foregroundCalled = false
-        var backgroundCalled = false
+        let foregroundCalled = Flag()
+        let backgroundCalled = Flag()
         let observer = LifecycleObserver(
-            onForeground: { foregroundCalled = true },
-            onBackground: { backgroundCalled = true }
+            onForeground: { foregroundCalled.value = true },
+            onBackground: { backgroundCalled.value = true }
         )
         observer.simulateBackground()
-        XCTAssertFalse(foregroundCalled)
-        XCTAssertTrue(backgroundCalled)
+        XCTAssertFalse(foregroundCalled.value)
+        XCTAssertTrue(backgroundCalled.value)
     }
 }
