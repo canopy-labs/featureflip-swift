@@ -5,6 +5,21 @@ public struct FlagValue: Codable, Sendable, Equatable {
     public let value: AnyCodableValue
     public let variation: String
     public let reason: String
+    /// Key of the prerequisite flag that caused this flag to serve its off variation.
+    /// Populated only when `reason == "prerequisite-failed"`.
+    public let prerequisiteKey: String?
+
+    public init(
+        value: AnyCodableValue,
+        variation: String,
+        reason: String,
+        prerequisiteKey: String? = nil
+    ) {
+        self.value = value
+        self.variation = variation
+        self.reason = reason
+        self.prerequisiteKey = prerequisiteKey
+    }
 }
 
 /// Type-erased Codable value for flag payloads.

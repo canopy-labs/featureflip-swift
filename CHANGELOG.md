@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`FlagValue.prerequisiteKey`.** Optional `String?` on the public `FlagValue` carrying the key of the prerequisite flag that caused this flag to serve its off variation. Populated by the server on the `/v1/client/evaluate` and `/v1/client/identify` responses when `reason == "prerequisite-failed"`. Nil for all other reasons. Adding the field is backward-compatible with cache files written by 2.0.0 — old cached snapshots decode with `prerequisiteKey == nil`.
+
 ## 2.0.0 — 2026-04-09
 
 ### BREAKING

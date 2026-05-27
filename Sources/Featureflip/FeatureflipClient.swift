@@ -96,6 +96,13 @@ public final class FeatureflipClient: @unchecked Sendable {
         core.jsonVariation(key, default: defaultValue)
     }
 
+    /// Returns the full evaluation detail for a flag (value, variation, reason, prerequisiteKey),
+    /// or `nil` if the flag is not present in the current snapshot. Mirrors the
+    /// `flagDetail` accessor on the browser and Android SDKs.
+    public func flagDetail(_ key: String) -> FlagValue? {
+        core.getFlag(key)
+    }
+
     // MARK: - Identify
 
     public func identify(context: [String: String]) async throws {
