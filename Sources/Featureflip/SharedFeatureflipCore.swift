@@ -86,11 +86,12 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     private var streamingDataSource: StreamingDataSource?
     private var pollingDataSource: PollingDataSource?
     private var lifecycleObserver: LifecycleObserver?
+    private let anonymousKeyStore: AnonymousKeyStore
 
     // MARK: - Production Init
 
     /// Creates a new core with real HTTP transport.
-    init(config: FeatureflipConfig) {
+    init(config: FeatureflipConfig, anonymousKeyStore: AnonymousKeyStore = UserDefaultsAnonymousKeyStore()) {
         self.config = config
         self.httpClient = HttpClient(baseUrl: config.baseUrl, clientKey: config.clientKey)
         self.cache = FlagCache(clientKey: config.clientKey)
@@ -100,11 +101,12 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             batchSize: config.flushBatchSize
         )
         self.isTestClient = false
-        self._currentContext = config.context
+        self.anonymousKeyStore = anonymousKeyStore
+        self._currentContext = resolveAnonymousContext(config.context, store: anonymousKeyStore)
     }
 
     /// Internal init for unit testing with a custom HTTP loader.
-    init(config: FeatureflipConfig, loader: HTTPDataLoader) {
+    init(config: FeatureflipConfig, loader: HTTPDataLoader, anonymousKeyStore: AnonymousKeyStore = UserDefaultsAnonymousKeyStore()) {
         self.config = config
         self.httpClient = HttpClient(baseUrl: config.baseUrl, clientKey: config.clientKey, loader: loader)
         self.cache = FlagCache(clientKey: config.clientKey)
@@ -114,7 +116,8 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             batchSize: config.flushBatchSize
         )
         self.isTestClient = false
-        self._currentContext = config.context
+        self.anonymousKeyStore = anonymousKeyStore
+        self._currentContext = resolveAnonymousContext(config.context, store: anonymousKeyStore)
     }
 
     /// Private init for test clients with static overrides.
@@ -133,6 +136,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             batchSize: dummyConfig.flushBatchSize
         )
         self.isTestClient = true
+        self.anonymousKeyStore = UserDefaultsAnonymousKeyStore()
         self._currentContext = dummyConfig.context
 
         // Convert overrides to FlagValue snapshot
@@ -172,6 +176,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             batchSize: skeletonConfig.flushBatchSize
         )
         self.isTestClient = true
+        self.anonymousKeyStore = UserDefaultsAnonymousKeyStore()
         self._currentContext = skeletonConfig.context
         lock.withLock {
             _initialized = true
@@ -205,9 +210,11 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             updateSnapshot(cached)
         }
 
-        // Fetch initial flags with initTimeout applied
+        // Fetch initial flags with initTimeout applied. Use currentContext (not
+        // config.context) so the persisted anonymous user_id resolved at init is
+        // sent on the first evaluate.
         do {
-            let response = try await httpClient.evaluate(context: config.context, timeout: config.initTimeout)
+            let response = try await httpClient.evaluate(context: currentContext, timeout: config.initTimeout)
             await cache.setAll(response.flags)
             updateSnapshot(response.flags)
         } catch {
@@ -287,17 +294,18 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     func identify(context: [String: String]) async throws {
         guard !isTestClient else { return }
 
-        let response = try await httpClient.identify(context: context)
+        let resolved = resolveAnonymousContext(context, store: anonymousKeyStore)
+        let response = try await httpClient.identify(context: resolved)
         await cache.setAll(response.flags)
         updateSnapshot(response.flags)
 
         // Update current context and data sources
         let (stream, poller): (StreamingDataSource?, PollingDataSource?) = lock.withLock {
-            _currentContext = context
+            _currentContext = resolved
             return (streamingDataSource, pollingDataSource)
         }
-        stream?.updateContext(context)
-        poller?.updateContext(context)
+        stream?.updateContext(resolved)
+        poller?.updateContext(resolved)
     }
 
     // MARK: - Track
