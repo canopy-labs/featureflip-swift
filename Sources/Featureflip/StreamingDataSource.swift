@@ -16,6 +16,11 @@ final class StreamingDataSource: @unchecked Sendable {
     private let clientKey: String
     private var context: [String: String]
     private let onChange: @Sendable ([String: FlagValue]) -> Void
+    // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
+    private let onSnapshot: (@Sendable ([String: FlagValue]) -> Void)?
+    // Invoked when the stream has failed maxRetries times so the core can fall back
+    // to polling (which retries forever). Never a terminal give-up.
+    private let onMaxRetriesReached: (@Sendable () -> Void)?
     private var task: Task<Void, Never>?
     private var backoff = initialBackoff
     private var retryCount = 0
@@ -25,12 +30,16 @@ final class StreamingDataSource: @unchecked Sendable {
         baseUrl: String,
         clientKey: String,
         context: [String: String],
-        onChange: @escaping @Sendable ([String: FlagValue]) -> Void
+        onChange: @escaping @Sendable ([String: FlagValue]) -> Void,
+        onSnapshot: (@Sendable ([String: FlagValue]) -> Void)? = nil,
+        onMaxRetriesReached: (@Sendable () -> Void)? = nil
     ) {
         self.baseUrl = baseUrl
         self.clientKey = clientKey
         self.context = context
         self.onChange = onChange
+        self.onSnapshot = onSnapshot
+        self.onMaxRetriesReached = onMaxRetriesReached
     }
 
     func start() {
@@ -117,7 +126,11 @@ final class StreamingDataSource: @unchecked Sendable {
             let currentBackoff = backoff
             lock.unlock()
 
-            guard currentRetryCount < Self.maxRetries else { return }
+            guard currentRetryCount < Self.maxRetries else {
+                // Not terminal: hand off to the polling fallback (retries forever).
+                onMaxRetriesReached?()
+                return
+            }
 
             do {
                 try await connect()
@@ -149,7 +162,7 @@ final class StreamingDataSource: @unchecked Sendable {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
 
-        // Reset backoff on successful connection
+        // Reset backoff on successful connection.
         lock.lock()
         backoff = Self.initialBackoff
         retryCount = 0
@@ -169,12 +182,21 @@ final class StreamingDataSource: @unchecked Sendable {
         }
     }
 
-    private func handleEvent(_ event: SSEEvent) {
+    func handleEvent(_ event: SSEEvent) {
+        // connection-ready carries only the connectionId (unused here) — ignore it.
         guard event.eventType == "flags-updated" else { return }
         guard let data = event.data.data(using: .utf8) else { return }
         do {
             let response = try JSONDecoder().decode(EvaluateResponse.self, from: data)
-            onChange(response.flags)
+            // The connect-time snapshot is marked `full: true` (#1873) -> REPLACE the
+            // store (drops flags deleted during the outage). Deltas omit it -> MERGE.
+            // Keyed off the explicit marker, not event order, so a delta racing ahead
+            // of the snapshot can't be mistaken for a full replace.
+            if response.full == true {
+                (onSnapshot ?? onChange)(response.flags)
+            } else {
+                onChange(response.flags)
+            }
         } catch {
             // Ignore parse errors
         }

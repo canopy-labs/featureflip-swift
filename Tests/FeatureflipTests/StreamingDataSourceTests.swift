@@ -1,6 +1,14 @@
 import XCTest
 @testable import Featureflip
 
+/// Thread-safe collector so the @Sendable stream callbacks can record what they received.
+private final class FlagsCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [[String: FlagValue]] = []
+    func add(_ flags: [String: FlagValue]) { lock.withLock { items.append(flags) } }
+    var all: [[String: FlagValue]] { lock.withLock { items } }
+}
+
 final class StreamingDataSourceTests: XCTestCase {
     func testBuildStreamURL() {
         let url = StreamingDataSource.buildStreamURL(
@@ -72,5 +80,31 @@ final class StreamingDataSourceTests: XCTestCase {
         let event = StreamingDataSource.parseSSEEvent(from: lines)
         XCTAssertEqual(event?.eventType, "message")
         XCTAssertEqual(event?.data, "line1\nline2\nline3")
+    }
+
+    func testFullMarkerReplacesWithoutFullMerges() {
+        let snapshots = FlagsCollector()
+        let deltas = FlagsCollector()
+
+        let ds = StreamingDataSource(
+            baseUrl: "https://eval.example.com",
+            clientKey: "key",
+            context: ["user_id": "u1"],
+            onChange: { deltas.add($0) },
+            onSnapshot: { snapshots.add($0) }
+        )
+
+        func flag(_ key: String) -> String {
+            "\"\(key)\":{\"value\":true,\"variation\":\"on\",\"reason\":\"Fallthrough\"}"
+        }
+        // The connect-time snapshot carries `full: true` (#1873); deltas omit it. The
+        // replace decision is keyed off the marker, not event order.
+        ds.handleEvent(SSEEvent(eventType: "flags-updated", data: "{\"full\":true,\"flags\":{\(flag("flag-a"))}}"))
+        ds.handleEvent(SSEEvent(eventType: "flags-updated", data: "{\"flags\":{\(flag("flag-b"))}}"))
+
+        XCTAssertEqual(snapshots.all.count, 1)
+        XCTAssertTrue(snapshots.all.first?.keys.contains("flag-a") ?? false)
+        XCTAssertEqual(deltas.all.count, 1)
+        XCTAssertTrue(deltas.all.first?.keys.contains("flag-b") ?? false)
     }
 }

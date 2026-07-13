@@ -63,6 +63,9 @@ extension AnyCodableValue: Codable {
 /// Server response from /v1/client/evaluate and /v1/client/identify.
 struct EvaluateResponse: Decodable {
     let flags: [String: FlagValue]
+    // The client SSE connect-time snapshot carries `full: true` (#1873); deltas omit it.
+    // Absent on /v1/client/evaluate + polling responses (they are always full replaces).
+    let full: Bool?
 }
 
 /// An analytics event sent to /v1/sdk/events.

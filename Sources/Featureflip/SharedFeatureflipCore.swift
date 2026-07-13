@@ -386,6 +386,14 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
                 context: ctx,
                 onChange: { [weak self] flags in
                     self?.handleStreamUpdate(flags)
+                },
+                // First flags-updated after (re)connect is the full snapshot -> REPLACE.
+                onSnapshot: { [weak self] flags in
+                    self?.handleFullUpdate(flags)
+                },
+                // Stream exhausted its retries -> fall back to polling (retries forever).
+                onMaxRetriesReached: { [weak self] in
+                    self?.handleStreamingFallback()
                 }
             )
             source.start()
@@ -398,6 +406,8 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     }
 
     func startPolling() {
+        // Idempotent: a stream->polling fallback must start at most one poller.
+        if lock.withLock({ pollingDataSource != nil }) { return }
         let ctx = lock.withLock { _currentContext }
 
         let source = PollingDataSource(
@@ -413,6 +423,29 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             pollingDataSource = source
         }
     }
+
+    /// Streaming exhausted its retries: tear down the dormant streaming source
+    /// before falling back to polling (which retries forever). Stopping and
+    /// nulling the stream keeps a later `handleForeground()`/`identify()` from
+    /// resurrecting it alongside the poller — two live sources racing stale
+    /// deltas over fresh poll snapshots. Mirrors Flutter's
+    /// `_handleStreamingFallback`. Safe to call from within the stream's
+    /// `onMaxRetriesReached` callback: `stop()` only cancels the Task, not join.
+    func handleStreamingFallback() {
+        let stream: StreamingDataSource? = lock.withLock {
+            let s = streamingDataSource
+            streamingDataSource = nil
+            return s
+        }
+        stream?.stop()
+        startPolling()
+    }
+
+    /// Test-only: whether a streaming source is currently held.
+    var hasStreamingSource: Bool { lock.withLock { streamingDataSource != nil } }
+
+    /// Test-only: whether a polling source is currently held.
+    var hasPollingSource: Bool { lock.withLock { pollingDataSource != nil } }
 
     private func handleStreamUpdate(_ flags: [String: FlagValue]) {
         mergeSnapshot(flags)
