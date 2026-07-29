@@ -1,5 +1,8 @@
 import Foundation
 
+/// The engine embeds the matched rule id in the reason as `rule-match:{id}`.
+private let ruleMatchPrefix = "rule-match:"
+
 /// Internal shared core that owns expensive resources (HTTP client, cache, event processor,
 /// data sources). Refcounted — when the last handle releases, the core shuts down.
 internal final class SharedFeatureflipCore: @unchecked Sendable {
@@ -121,8 +124,11 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     }
 
     /// Private init for test clients with static overrides.
-    private init(overrides: [String: Any], loader: HTTPDataLoader? = nil) {
-        let dummyConfig = FeatureflipConfig(clientKey: "test-key", baseUrl: "https://localhost")
+    /// `inspectors` is threaded through so a stub client honors them exactly
+    /// like a real one — a test-only client that silently dropped them would
+    /// make inspector code untestable.
+    private init(overrides: [String: Any], loader: HTTPDataLoader? = nil, inspectors: [EvaluationInspector] = []) {
+        let dummyConfig = FeatureflipConfig(clientKey: "test-key", baseUrl: "https://localhost", inspectors: inspectors)
         self.config = dummyConfig
         if let loader = loader {
             self.httpClient = HttpClient(baseUrl: dummyConfig.baseUrl, clientKey: dummyConfig.clientKey, loader: loader)
@@ -258,34 +264,86 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
 
     /// Returns a boolean flag value, or the default if the flag is missing or not a boolean.
     func boolVariation(_ key: String, default defaultValue: Bool) -> Bool {
-        guard let flag = getFlag(key), case .bool(let v) = flag.value else {
-            return defaultValue
+        let flag = getFlag(key)
+        var value = defaultValue
+        if let flag = flag, case .bool(let v) = flag.value {
+            value = v
         }
-        return v
+        notifyInspectors(key, flag, .bool(value))
+        return value
     }
 
     /// Returns a string flag value, or the default if the flag is missing or not a string.
     func stringVariation(_ key: String, default defaultValue: String) -> String {
-        guard let flag = getFlag(key), case .string(let v) = flag.value else {
-            return defaultValue
+        let flag = getFlag(key)
+        var value = defaultValue
+        if let flag = flag, case .string(let v) = flag.value {
+            value = v
         }
-        return v
+        notifyInspectors(key, flag, .string(value))
+        return value
     }
 
     /// Returns a numeric flag value as Double, or the default if the flag is missing or not numeric.
     func numberVariation(_ key: String, default defaultValue: Double) -> Double {
-        guard let flag = getFlag(key) else { return defaultValue }
-        switch flag.value {
-        case .double(let v): return v
-        case .int(let v): return Double(v)
-        default: return defaultValue
+        let flag = getFlag(key)
+        var value = defaultValue
+        if let flag = flag {
+            switch flag.value {
+            case .double(let v): value = v
+            case .int(let v): value = Double(v)
+            default: break
+            }
         }
+        notifyInspectors(key, flag, .double(value))
+        return value
     }
 
     /// Returns the raw flag value, or the default if the flag is missing.
     func jsonVariation(_ key: String, default defaultValue: AnyCodableValue) -> AnyCodableValue {
-        guard let flag = getFlag(key) else { return defaultValue }
-        return flag.value
+        let flag = getFlag(key)
+        let value = flag?.value ?? defaultValue
+        notifyInspectors(key, flag, value)
+        return value
+    }
+
+    /// Fire the registered inspectors. Called once per variation call, after
+    /// type coercion, so `value` is exactly what the accessor returns.
+    ///
+    /// Per-inspector error isolation is structural here: `EvaluationInspector`
+    /// is a non-throwing function type, so an inspector cannot break the
+    /// returned value or stop its siblings — there is nothing to catch.
+    private func notifyInspectors(_ key: String, _ flag: FlagValue?, _ value: AnyCodableValue) {
+        let inspectors = config.inspectors
+        guard !inspectors.isEmpty, !isShutDown else { return }
+
+        // The flag is absent from the snapshot (unknown key, not yet
+        // initialized, or not clientSideVisible). The server never sent a reason
+        // for it, so synthesize one in the same kebab-case as the rest.
+        let reason = flag?.reason ?? "flag-not-found"
+        var ruleId: String?
+        if reason.hasPrefix(ruleMatchPrefix) {
+            let suffix = String(reason.dropFirst(ruleMatchPrefix.count))
+            ruleId = suffix.isEmpty ? nil : suffix
+        }
+
+        let event = EvaluationEvent(
+            flagKey: key,
+            // Value-type copy — Swift dictionaries are copy-on-write, so a
+            // buggy inspector cannot mutate core state. Uses the same
+            // anon-id-resolved context the flags were evaluated against.
+            context: currentContext,
+            value: value,
+            variationKey: flag?.variation,
+            reason: reason,
+            ruleId: ruleId,
+            prerequisiteKey: flag?.prerequisiteKey,
+            timestamp: Self.isoFormatter.string(from: Date())
+        )
+
+        for inspector in inspectors {
+            inspector(event)
+        }
     }
 
     // MARK: - Identify
@@ -513,13 +571,20 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     }
 
     /// Creates a test core with static flag overrides — NOT via cache.
-    static func createForTestingStub(_ overrides: [String: Any]) -> SharedFeatureflipCore {
-        SharedFeatureflipCore(overrides: overrides)
+    static func createForTestingStub(
+        _ overrides: [String: Any],
+        inspectors: [EvaluationInspector] = []
+    ) -> SharedFeatureflipCore {
+        SharedFeatureflipCore(overrides: overrides, inspectors: inspectors)
     }
 
     /// Internal variant for unit testing with a custom HTTP loader.
-    static func forTesting(_ overrides: [String: Any], loader: HTTPDataLoader) -> SharedFeatureflipCore {
-        SharedFeatureflipCore(overrides: overrides, loader: loader)
+    static func forTesting(
+        _ overrides: [String: Any],
+        loader: HTTPDataLoader,
+        inspectors: [EvaluationInspector] = []
+    ) -> SharedFeatureflipCore {
+        SharedFeatureflipCore(overrides: overrides, loader: loader, inspectors: inspectors)
     }
 }
 

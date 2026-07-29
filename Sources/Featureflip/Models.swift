@@ -82,3 +82,46 @@ struct SdkEvent: Encodable {
 struct RecordEventsRequest: Encodable {
     let events: [SdkEvent]
 }
+
+/// Emitted once per variation call. `reason` is the server's kebab-case string
+/// forwarded verbatim — client SDKs have no local evaluator, so the engine is
+/// their evaluator. The one synthesized value is `flag-not-found`, used when the
+/// flag is absent from the snapshot.
+public struct EvaluationEvent: Sendable {
+    public let flagKey: String
+    public let context: [String: String]
+    public let value: AnyCodableValue
+    /// The served arm. Nil when the flag is absent from the snapshot.
+    public let variationKey: String?
+    public let reason: String
+    /// Parsed from a `rule-match:{id}` reason; nil for every other reason.
+    public let ruleId: String?
+    /// Set by the server only when `reason == "prerequisite-failed"`.
+    public let prerequisiteKey: String?
+    /// ISO-8601.
+    public let timestamp: String
+
+    public init(
+        flagKey: String,
+        context: [String: String],
+        value: AnyCodableValue,
+        variationKey: String? = nil,
+        reason: String,
+        ruleId: String? = nil,
+        prerequisiteKey: String? = nil,
+        timestamp: String
+    ) {
+        self.flagKey = flagKey
+        self.context = context
+        self.value = value
+        self.variationKey = variationKey
+        self.reason = reason
+        self.ruleId = ruleId
+        self.prerequisiteKey = prerequisiteKey
+        self.timestamp = timestamp
+    }
+}
+
+/// An in-process observer invoked on every variation call. Return value ignored.
+/// `@Sendable` is required — `FeatureflipConfig` is `Sendable` and stores these.
+public typealias EvaluationInspector = @Sendable (EvaluationEvent) -> Void

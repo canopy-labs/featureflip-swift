@@ -10,6 +10,10 @@ public struct FeatureflipConfig: Sendable {
     public let flushInterval: TimeInterval
     public let flushBatchSize: Int
     public let initTimeout: TimeInterval
+    /// In-process observers fired on every variation call. Honored on the first
+    /// client created per `clientKey` — later clients share that core's config,
+    /// like every other option.
+    public let inspectors: [EvaluationInspector]
 
     public init(
         clientKey: String,
@@ -19,7 +23,8 @@ public struct FeatureflipConfig: Sendable {
         pollInterval: TimeInterval = 30,
         flushInterval: TimeInterval = 30,
         flushBatchSize: Int = 100,
-        initTimeout: TimeInterval = 10
+        initTimeout: TimeInterval = 10,
+        inspectors: [EvaluationInspector] = []
     ) {
         self.clientKey = clientKey
         self.baseUrl = baseUrl
@@ -29,5 +34,6 @@ public struct FeatureflipConfig: Sendable {
         self.flushInterval = flushInterval
         self.flushBatchSize = flushBatchSize
         self.initTimeout = initTimeout
+        self.inspectors = inspectors
     }
 }

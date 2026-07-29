@@ -125,13 +125,22 @@ public final class FeatureflipClient: @unchecked Sendable {
 
     /// Creates a no-network test client with static flag overrides.
     /// Bypasses the cache — each call returns an independent client.
-    public static func forTesting(_ overrides: [String: Any]) -> FeatureflipClient {
-        FeatureflipClient(core: SharedFeatureflipCore.createForTestingStub(overrides))
+    /// `inspectors` fire on the stub's variation accessors exactly as they do
+    /// on a real client.
+    public static func forTesting(
+        _ overrides: [String: Any],
+        inspectors: [EvaluationInspector] = []
+    ) -> FeatureflipClient {
+        FeatureflipClient(core: SharedFeatureflipCore.createForTestingStub(overrides, inspectors: inspectors))
     }
 
     /// Internal variant for unit testing with a custom HTTP loader.
-    internal static func forTesting(_ overrides: [String: Any], loader: HTTPDataLoader) -> FeatureflipClient {
-        FeatureflipClient(core: SharedFeatureflipCore.forTesting(overrides, loader: loader))
+    internal static func forTesting(
+        _ overrides: [String: Any],
+        loader: HTTPDataLoader,
+        inspectors: [EvaluationInspector] = []
+    ) -> FeatureflipClient {
+        FeatureflipClient(core: SharedFeatureflipCore.forTesting(overrides, loader: loader, inspectors: inspectors))
     }
 
     // MARK: - Internal

@@ -22,7 +22,12 @@ final class StreamingDataSource: @unchecked Sendable {
     // to polling (which retries forever). Never a terminal give-up.
     private let onMaxRetriesReached: (@Sendable () -> Void)?
     private var task: Task<Void, Never>?
-    private var backoff = initialBackoff
+    // The delay the first reconnect waits, and the value backoff resets to. Held as
+    // an instance property (rather than reading the static directly) so tests can
+    // drive the retry cap without waiting out the real 1s-and-doubling schedule —
+    // mirrors the android source's `initialBackoffMs` parameter.
+    private let baseBackoff: TimeInterval
+    private var backoff: TimeInterval
     private var retryCount = 0
     private let lock = NSLock()
 
@@ -32,7 +37,8 @@ final class StreamingDataSource: @unchecked Sendable {
         context: [String: String],
         onChange: @escaping @Sendable ([String: FlagValue]) -> Void,
         onSnapshot: (@Sendable ([String: FlagValue]) -> Void)? = nil,
-        onMaxRetriesReached: (@Sendable () -> Void)? = nil
+        onMaxRetriesReached: (@Sendable () -> Void)? = nil,
+        initialBackoff: TimeInterval = StreamingDataSource.initialBackoff
     ) {
         self.baseUrl = baseUrl
         self.clientKey = clientKey
@@ -40,6 +46,8 @@ final class StreamingDataSource: @unchecked Sendable {
         self.onChange = onChange
         self.onSnapshot = onSnapshot
         self.onMaxRetriesReached = onMaxRetriesReached
+        self.baseBackoff = initialBackoff
+        self.backoff = initialBackoff
     }
 
     func start() {
@@ -47,7 +55,7 @@ final class StreamingDataSource: @unchecked Sendable {
         // Reset retry state for fresh connection attempt
         lock.lock()
         retryCount = 0
-        backoff = Self.initialBackoff
+        backoff = baseBackoff
         lock.unlock()
 
         task = Task { [weak self] in
@@ -164,7 +172,7 @@ final class StreamingDataSource: @unchecked Sendable {
 
         // Reset backoff on successful connection.
         lock.lock()
-        backoff = Self.initialBackoff
+        backoff = baseBackoff
         retryCount = 0
         lock.unlock()
 

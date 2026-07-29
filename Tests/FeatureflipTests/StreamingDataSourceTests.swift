@@ -107,4 +107,35 @@ final class StreamingDataSourceTests: XCTestCase {
         XCTAssertEqual(deltas.all.count, 1)
         XCTAssertTrue(deltas.all.first?.keys.contains("flag-b") ?? false)
     }
+
+    // GAP-A: a stream that stays down must exhaust its retries and hand off to the
+    // polling fallback rather than giving up. This drives the real connect loop to
+    // the cap — the wiring the core relies on to call handleStreamingFallback().
+    // Port 1 is never listening, so every attempt fails fast (connection refused),
+    // which is the swift analogue of the android test's repeated 500s.
+    func testStreamThatStaysDownReachesRetryCapAndSignalsFallback() {
+        // DispatchSemaphore is Sendable, so it can be signalled from the source's
+        // @Sendable callback without an unchecked-Sendable box.
+        let reachedCap = DispatchSemaphore(value: 0)
+
+        let ds = StreamingDataSource(
+            baseUrl: "http://127.0.0.1:1",
+            clientKey: "key",
+            context: ["user_id": "u1"],
+            onChange: { _ in },
+            onSnapshot: { _ in },
+            onMaxRetriesReached: { reachedCap.signal() },
+            // Keep the 5-retry schedule but collapse its wall-clock.
+            initialBackoff: 0.01
+        )
+        ds.start()
+
+        XCTAssertEqual(
+            reachedCap.wait(timeout: .now() + 10),
+            .success,
+            "onMaxRetriesReached should fire so the core can fall back to polling"
+        )
+        XCTAssertTrue(ds.isMaxRetriesReached)
+        ds.stop()
+    }
 }
