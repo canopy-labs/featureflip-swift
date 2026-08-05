@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.1 — 2026-08-05
+
+### Fixed
+
+- `LICENSE` is now the verbatim Apache-2.0 text. Three phrases in the operative sections had been reworded and the appendix dropped, which left automated license scanners unable to identify it. The license itself is unchanged; the file now says what it always claimed to.
+- The README's License section said MIT. The `LICENSE` file has always been Apache-2.0, which is the actual license.
+
 ## 2.4.0 — 2026-07-29
 
 ### Added
