@@ -14,7 +14,7 @@ final class StreamingDataSource: @unchecked Sendable {
 
     private let baseUrl: String
     private let clientKey: String
-    private var context: [String: String]
+    private var context: [String: AnyCodableValue]
     private let onChange: @Sendable ([String: FlagValue]) -> Void
     // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
     private let onSnapshot: (@Sendable ([String: FlagValue]) -> Void)?
@@ -34,7 +34,7 @@ final class StreamingDataSource: @unchecked Sendable {
     init(
         baseUrl: String,
         clientKey: String,
-        context: [String: String],
+        context: [String: AnyCodableValue],
         onChange: @escaping @Sendable ([String: FlagValue]) -> Void,
         onSnapshot: (@Sendable ([String: FlagValue]) -> Void)? = nil,
         onMaxRetriesReached: (@Sendable () -> Void)? = nil,
@@ -68,7 +68,7 @@ final class StreamingDataSource: @unchecked Sendable {
         task = nil
     }
 
-    func updateContext(_ newContext: [String: String]) {
+    func updateContext(_ newContext: [String: AnyCodableValue]) {
         lock.lock()
         context = newContext
         lock.unlock()
@@ -87,10 +87,25 @@ final class StreamingDataSource: @unchecked Sendable {
     static func buildStreamURL(
         baseUrl: String,
         clientKey: String,
-        context: [String: String]
+        context: [String: AnyCodableValue]
     ) -> URL? {
         guard var components = URLComponents(string: baseUrl + "/v1/client/stream") else { return nil }
-        let contextJSON = (try? JSONSerialization.data(withJSONObject: context)) ?? Data()
+        // JSONEncoder, not JSONSerialization: context values are AnyCodableValue
+        // (Codable) since #2293, not plist types.
+        //
+        // This encode can now actually fail — JSONEncoder throws on a non-finite
+        // Double, which context could not express while it was [String: String].
+        // Swallowing that would connect the stream with an EMPTY context, silently
+        // evaluating every user as anonymous with no signal anywhere (#2322).
+        let contextJSON: Data
+        do {
+            contextJSON = try JSONEncoder().encode(context)
+        } catch {
+            Diagnostics.log(
+                "could not encode context for the stream URL, connecting without it: \(error)"
+            )
+            contextJSON = Data()
+        }
         let encodedContext = contextJSON.base64EncodedString()
         components.queryItems = [
             URLQueryItem(name: "authorization", value: clientKey),

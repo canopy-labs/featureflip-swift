@@ -54,9 +54,18 @@ public final class FeatureflipClient: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
+    /// Whether this handle is closed. Read under `closeLock`, like every other
+    /// access to `closed` — `close()` can run concurrently with an evaluation.
+    private var isClosed: Bool {
+        closeLock.withLock { closed }
+    }
+
     /// Whether the client has been initialized.
+    ///
+    /// False once this handle is closed: `close()` releases the core, so the handle
+    /// can no longer evaluate anything (#2327).
     public var isInitialized: Bool {
-        core.isInitialized
+        !isClosed && core.isInitialized
     }
 
     /// Initializes the client: loads disk cache, fetches flags, starts streaming/polling.
@@ -79,34 +88,45 @@ public final class FeatureflipClient: @unchecked Sendable {
     }
 
     // MARK: - Variation methods
+    //
+    // A closed handle serves the caller's default (#2327, contract from #2313).
+    // close() releases the core — stopping streaming/polling and flushing events —
+    // but the in-memory snapshot stays readable, so without these guards the handle
+    // would keep serving a frozen snapshot that can never update again.
 
     public func boolVariation(_ key: String, default defaultValue: Bool) -> Bool {
-        core.boolVariation(key, default: defaultValue)
+        guard !isClosed else { return defaultValue }
+        return core.boolVariation(key, default: defaultValue)
     }
 
     public func stringVariation(_ key: String, default defaultValue: String) -> String {
-        core.stringVariation(key, default: defaultValue)
+        guard !isClosed else { return defaultValue }
+        return core.stringVariation(key, default: defaultValue)
     }
 
     public func numberVariation(_ key: String, default defaultValue: Double) -> Double {
-        core.numberVariation(key, default: defaultValue)
+        guard !isClosed else { return defaultValue }
+        return core.numberVariation(key, default: defaultValue)
     }
 
     public func jsonVariation(_ key: String, default defaultValue: AnyCodableValue) -> AnyCodableValue {
-        core.jsonVariation(key, default: defaultValue)
+        guard !isClosed else { return defaultValue }
+        return core.jsonVariation(key, default: defaultValue)
     }
 
     /// Returns the full evaluation detail for a flag (value, variation, reason, prerequisiteKey),
     /// or `nil` if the flag is not present in the current snapshot. Mirrors the
     /// `flagDetail` accessor on the browser and Android SDKs.
     public func flagDetail(_ key: String) -> FlagValue? {
-        core.getFlag(key)
+        guard !isClosed else { return nil }
+        return core.getFlag(key)
     }
 
     // MARK: - Identify
 
-    public func identify(context: [String: String]) async throws {
-        try await core.identify(context: context)
+    public func identify(context: [String: Any]) async throws {
+        // Converted at the boundary, like FeatureflipConfig's init (#2293).
+        try await core.identify(context: context.mapValues { AnyCodableValue(any: $0) })
     }
 
     // MARK: - Track
@@ -145,9 +165,11 @@ public final class FeatureflipClient: @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// Returns all current flag values.
+    /// Returns all current flag values, or an empty dictionary once closed — the
+    /// bulk-read analogue of a variation falling back to its default.
     internal func allFlags() -> [String: FlagValue] {
-        core.allFlags()
+        guard !isClosed else { return [:] }
+        return core.allFlags()
     }
 
     /// Exposed for testing — applies a delta update to the in-memory snapshot.

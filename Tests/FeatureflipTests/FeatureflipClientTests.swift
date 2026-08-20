@@ -119,8 +119,11 @@ final class FeatureflipClientTests: XCTestCase {
 
         XCTAssertEqual(client.boolVariation("feature", default: true), false)
 
-        // Stop background poller so identify() is the only consumer of mock responses
-        await client.close()
+        // NOT closed here. This used to close the handle to quiet the background
+        // poller and then keep using it, which depended on a closed client still
+        // evaluating — the bug #2327 fixes. identify() is the only consumer of the
+        // mock response regardless: doInitialize() awaits evaluate() before
+        // startDataSource(), and the poll interval is 30s.
 
         // Identify with new context — returns updated flags
         let updatedFlags: [String: FlagValue] = [
@@ -131,6 +134,8 @@ final class FeatureflipClientTests: XCTestCase {
         try await client.identify(context: ["user_id": "new-user"])
 
         XCTAssertEqual(client.boolVariation("feature", default: false), true)
+
+        await client.close()
     }
 
     func testAllFlags() {
@@ -232,7 +237,7 @@ final class FeatureflipClientTests: XCTestCase {
         // overwrites the merged snapshot via handleFullUpdate().
 
         await client.initialize()
-        await client.close()
+        // Not closed here — see testIdentifyRefetchesFlags (#2327).
 
         // Simulate SSE delta: only flag-b changed
         let delta: [String: FlagValue] = [
@@ -243,6 +248,8 @@ final class FeatureflipClientTests: XCTestCase {
         // flag-a should still exist (unchanged), flag-b should be updated
         XCTAssertEqual(client.boolVariation("flag-a", default: false), true)
         XCTAssertEqual(client.stringVariation("flag-b", default: ""), "world")
+
+        await client.close()
     }
 
     func testHandleFlagUpdateRemovesFlagWithFlagRemoved() async {
@@ -262,7 +269,7 @@ final class FeatureflipClientTests: XCTestCase {
         let client = FeatureflipClient(config: config, loader: loader)
 
         await client.initialize()
-        await client.close()
+        // Not closed here — see testIdentifyRefetchesFlags (#2327).
 
         // Simulate SSE delta: flag-b removed
         let delta: [String: FlagValue] = [
@@ -273,6 +280,8 @@ final class FeatureflipClientTests: XCTestCase {
         // flag-a should still exist, flag-b should be gone
         XCTAssertEqual(client.boolVariation("flag-a", default: false), true)
         XCTAssertEqual(client.stringVariation("flag-b", default: "gone"), "gone")
+
+        await client.close()
     }
 
     func testHandleFlagUpdateAddsNewFlags() async {
@@ -291,7 +300,7 @@ final class FeatureflipClientTests: XCTestCase {
         let client = FeatureflipClient(config: config, loader: loader)
 
         await client.initialize()
-        await client.close()
+        // Not closed here — see testIdentifyRefetchesFlags (#2327).
 
         // Simulate SSE delta: new flag added
         let delta: [String: FlagValue] = [
@@ -301,6 +310,8 @@ final class FeatureflipClientTests: XCTestCase {
 
         XCTAssertEqual(client.boolVariation("flag-a", default: false), true)
         XCTAssertEqual(client.stringVariation("flag-b", default: ""), "new")
+
+        await client.close()
     }
 
     // MARK: - Test client network guard tests (#276)

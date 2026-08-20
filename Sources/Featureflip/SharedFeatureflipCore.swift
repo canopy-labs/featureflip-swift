@@ -63,11 +63,11 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     private var _initTask: Task<Void, Never>?
 
     /// Mutable context updated by identify(), protected by `lock`.
-    var currentContext: [String: String] {
+    var currentContext: [String: AnyCodableValue] {
         get { lock.withLock { _currentContext } }
         set { lock.withLock { _currentContext = newValue } }
     }
-    private var _currentContext: [String: String]
+    private var _currentContext: [String: AnyCodableValue]
 
     /// Whether the core has been initialized.
     var isInitialized: Bool {
@@ -148,19 +148,11 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         // Convert overrides to FlagValue snapshot
         var snapshot: [String: FlagValue] = [:]
         for (key, value) in overrides {
-            let codableValue: AnyCodableValue
-            switch value {
-            case let b as Bool:
-                codableValue = .bool(b)
-            case let s as String:
-                codableValue = .string(s)
-            case let i as Int:
-                codableValue = .int(i)
-            case let d as Double:
-                codableValue = .double(d)
-            default:
-                codableValue = .string(String(describing: value))
-            }
+            // Was a hand-rolled switch that stringified anything non-primitive, so
+            // forTesting(["cfg": ["a": 1]]) produced .string("[\"a\": 1]") and no
+            // jsonVariation stub test could express an object. AnyCodableValue(any:)
+            // is the one conversion now (#2293).
+            let codableValue = AnyCodableValue(any: value)
             snapshot[key] = FlagValue(value: codableValue, variation: "override", reason: "TEST")
         }
         snapshotLock.withLock {
@@ -224,7 +216,15 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             await cache.setAll(response.flags)
             updateSnapshot(response.flags)
         } catch {
-            // Use cached flags if available
+            // Non-terminal: any flags already loaded from cache above keep serving,
+            // the data source started below retries forever and re-snapshots on
+            // connect, and anything still unknown falls back to the caller's
+            // default. Rethrowing here would take an app down at startup over a
+            // transient blip.
+            //
+            // But never silently: a revoked key, a 4xx/5xx, a timeout and a decode
+            // failure otherwise all present exactly like a healthy start (#2322).
+            Diagnostics.log("initial flag fetch failed, serving cached or default values until the data source recovers: \(error)")
         }
 
         // Start data source
@@ -349,7 +349,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     // MARK: - Identify
 
     /// Re-evaluates flags for a new user context.
-    func identify(context: [String: String]) async throws {
+    func identify(context: [String: AnyCodableValue]) async throws {
         guard !isTestClient else { return }
 
         let resolved = resolveAnonymousContext(context, store: anonymousKeyStore)
@@ -372,7 +372,9 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     func track(_ eventName: String, metadata: [String: AnyCodableValue]? = nil) {
         guard !isTestClient else { return }
 
-        let userId = lock.withLock { _currentContext["user_id"] }
+        // Context values are AnyCodableValue since #2293; SdkEvent.userId is String?.
+        // displayString keeps an absent id nil and renders a numeric id.
+        let userId = lock.withLock { _currentContext["user_id"]?.displayString }
 
         let event = SdkEvent(
             type: "Custom",

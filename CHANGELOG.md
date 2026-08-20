@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.0.0 — 2026-08-20
+
+### Fixed
+
+- A closed handle serves the caller's default from every accessor and reports not-initialized. `close()` releases the shared core — stopping streaming and polling, shutting down the event processor — but the in-memory snapshot stayed readable, so a closed client kept evaluating against a frozen snapshot that could never update again while still reporting itself initialized. ([#2327](https://github.com/canopy-labs/featureflip/issues/2327))
+
+- A failed initial flag fetch is now diagnosable rather than swallowed by a bare `catch`. ([#2322](https://github.com/canopy-labs/featureflip/issues/2322))
+### Changed
+
+- **BREAKING:** the evaluation context now accepts any JSON value, not just strings. It was typed `[String: String]`, so this SDK could not send a JSON number — and the engine's equality coercion only engages for numbers, so a rule like `age Equals ["25.0"]` matched on web and Flutter and silently no-opped here ([#2293](https://github.com/canopy-labs/featureflip/issues/2293)).
+
+  `FeatureflipConfig(context:)` and `identify(context:)` now take `[String: Any]`; both are source-compatible at the call site (`[String: String]` upcasts implicitly). What breaks is **reading**: `FeatureflipConfig.context` and `EvaluationEvent.context` are now `[String: AnyCodableValue]`, so an inspector doing `event.context["user_id"]` as a `String?` must use `.displayString`. `[String: Any]` could not be used for storage — both types are `Sendable`, and `Any` is not.
+
+  `AnyCodableValue` gains `init(any:)`, a public `displayString`, and `ExpressibleBy{String,Integer,Float,Boolean,Nil}Literal`, so `["age": 25, "plan": "pro"]` reads naturally.
+
 ## 2.4.1 — 2026-08-05
 
 ### Fixed

@@ -4,7 +4,10 @@ import Foundation
 public struct FeatureflipConfig: Sendable {
     public let clientKey: String
     public let baseUrl: String
-    public var context: [String: String]
+    /// `private(set)`: the initializer takes `[String: Any]` and converts, so a
+    /// settable property of the converted type would be an asymmetry callers
+    /// could not satisfy (`config.context = myAnyDict` would not compile).
+    public private(set) var context: [String: AnyCodableValue]
     public let streaming: Bool
     public let pollInterval: TimeInterval
     public let flushInterval: TimeInterval
@@ -18,7 +21,7 @@ public struct FeatureflipConfig: Sendable {
     public init(
         clientKey: String,
         baseUrl: String = "https://eval.featureflip.io",
-        context: [String: String] = [:],
+        context: [String: Any] = [:],
         streaming: Bool = true,
         pollInterval: TimeInterval = 30,
         flushInterval: TimeInterval = 30,
@@ -28,7 +31,9 @@ public struct FeatureflipConfig: Sendable {
     ) {
         self.clientKey = clientKey
         self.baseUrl = baseUrl
-        self.context = context
+        // Converted once at the boundary: the stored property is AnyCodableValue so
+        // FeatureflipConfig stays Sendable and encodable (#2293).
+        self.context = context.mapValues { AnyCodableValue(any: $0) }
         self.streaming = streaming
         self.pollInterval = pollInterval
         self.flushInterval = flushInterval

@@ -33,6 +33,112 @@ public enum AnyCodableValue: Sendable, Equatable {
     case null
 }
 
+extension AnyCodableValue {
+    /// Bridges an untyped value from the public context API into the Codable,
+    /// Sendable representation used for storage and on the wire.
+    ///
+    /// Context accepts `Any` for ergonomics (matching browser and flutter), but
+    /// `[String: Any]` is neither `Codable` nor `Sendable`, and `FeatureflipConfig`
+    /// and `EvaluationEvent` are both `Sendable` — so the conversion happens once,
+    /// at the boundary, and everything downstream stays typed. See #2293.
+    ///
+    /// `Bool` is matched BEFORE the integer cases on purpose: an `NSNumber`-backed
+    /// value satisfies both, and mapping `true` to `.int(1)` would send `1` where
+    /// the engine expects a JSON boolean.
+    public init(any value: Any?) {
+        guard let value else {
+            self = .null
+            return
+        }
+        switch value {
+        case is NSNull:
+            self = .null
+        case let v as NSNumber:
+            // Handled BEFORE the native cases, and case order alone is not enough:
+            // `NSNumber(value: 1) as? Bool` returns TRUE on Darwin, so a `case let v
+            // as Bool` placed first would turn the number 1 into `true` on the wire —
+            // the #2293 failure mode again. Only CFBoolean identity separates a real
+            // boolean from a numeric 1. Every native Bool/Int/Double also bridges to
+            // NSNumber, so this one case covers them plus Int64/Int32/UInt/CGFloat/
+            // Decimal, which satisfy none of the native casts and would stringify.
+            if CFGetTypeID(v) == CFBooleanGetTypeID() {
+                self = .bool(v.boolValue)
+            } else if let i = v as? Int {
+                self = .int(i)
+            } else {
+                self = .double(v.doubleValue)
+            }
+        case let v as Bool:
+            self = .bool(v)
+        case let v as Int:
+            self = .int(v)
+        case let v as Double:
+            self = .double(v)
+        case let v as Float:
+            self = .double(Double(v))
+        case let v as String:
+            self = .string(v)
+        case let v as [Any]:
+            self = .array(v.map { AnyCodableValue(any: $0) })
+        case let v as [String: Any]:
+            self = .dictionary(v.mapValues { AnyCodableValue(any: $0) })
+        case let v as AnyCodableValue:
+            self = v
+        default:
+            // `x as Any` where x is Optional boxes the OPTIONAL, so a nil reaches
+            // here as .some(Optional.none) and no case above sees it. Left to
+            // String(describing:) it becomes the literal "nil" — and since the
+            // public entry points take [String: Any], `identify(["email": user.email])`
+            // with an optional email is the common case. Unwrap and recurse.
+            let mirror = Mirror(reflecting: value)
+            if mirror.displayStyle == .optional {
+                self = AnyCodableValue(any: mirror.children.first?.value)
+            } else {
+                self = .string(String(describing: value))
+            }
+        }
+    }
+
+    /// The value rendered as a string. Public because `EvaluationEvent.context` is
+    /// public and is `[String: AnyCodableValue]` since #2293 — without this an
+    /// inspector would have to hand-roll a switch to read its own event.
+    /// Nil for `.null` and for the container cases.
+    public var displayString: String? {
+        switch self {
+        case .null: return nil
+        case .string(let v): return v
+        case .bool(let v): return String(v)
+        case .int(let v): return String(v)
+        case .double(let v): return String(v)
+        case .array, .dictionary: return nil
+        }
+    }
+}
+
+// Literal conformances so a context reads naturally at the call site —
+// `["age": 25, "plan": "pro"]` types as [String: AnyCodableValue] directly, with no
+// wrapping. Purely additive, and it keeps the stored/Sendable representation
+// ergonomic now that context is no longer [String: String] (#2293).
+extension AnyCodableValue: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) { self = .string(value) }
+}
+
+extension AnyCodableValue: ExpressibleByIntegerLiteral {
+    public init(integerLiteral value: Int) { self = .int(value) }
+}
+
+extension AnyCodableValue: ExpressibleByFloatLiteral {
+    public init(floatLiteral value: Double) { self = .double(value) }
+}
+
+extension AnyCodableValue: ExpressibleByBooleanLiteral {
+    public init(booleanLiteral value: Bool) { self = .bool(value) }
+}
+
+extension AnyCodableValue: ExpressibleByNilLiteral {
+    public init(nilLiteral: ()) { self = .null }
+}
+
 extension AnyCodableValue: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -89,7 +195,7 @@ struct RecordEventsRequest: Encodable {
 /// flag is absent from the snapshot.
 public struct EvaluationEvent: Sendable {
     public let flagKey: String
-    public let context: [String: String]
+    public let context: [String: AnyCodableValue]
     public let value: AnyCodableValue
     /// The served arm. Nil when the flag is absent from the snapshot.
     public let variationKey: String?
@@ -103,7 +209,7 @@ public struct EvaluationEvent: Sendable {
 
     public init(
         flagKey: String,
-        context: [String: String],
+        context: [String: AnyCodableValue],
         value: AnyCodableValue,
         variationKey: String? = nil,
         reason: String,

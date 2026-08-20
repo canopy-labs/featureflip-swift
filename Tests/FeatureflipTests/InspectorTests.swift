@@ -250,8 +250,10 @@ final class InspectorTests: XCTestCase {
 
         await client.close()
 
-        // The value still resolves; only the inspector goes quiet.
-        XCTAssertTrue(client.boolVariation("stub-flag", default: false))
+        // A closed handle serves the caller's default (#2327). The assertion this
+        // test exists for is the event count, which is unchanged — the inspector
+        // stays quiet either way.
+        XCTAssertFalse(client.boolVariation("stub-flag", default: false))
         XCTAssertEqual(collector.events.count, 1)
     }
 

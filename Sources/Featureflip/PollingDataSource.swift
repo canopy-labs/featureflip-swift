@@ -3,7 +3,7 @@ import Foundation
 /// Periodically fetches evaluated flags via HTTP polling.
 final class PollingDataSource: @unchecked Sendable {
     private let httpClient: HttpClient
-    private var context: [String: String]
+    private var context: [String: AnyCodableValue]
     private let interval: TimeInterval
     private let onChange: @Sendable ([String: FlagValue]) -> Void
     private var task: Task<Void, Never>?
@@ -11,7 +11,7 @@ final class PollingDataSource: @unchecked Sendable {
 
     init(
         httpClient: HttpClient,
-        context: [String: String],
+        context: [String: AnyCodableValue],
         interval: TimeInterval,
         onChange: @escaping @Sendable ([String: FlagValue]) -> Void
     ) {
@@ -39,7 +39,7 @@ final class PollingDataSource: @unchecked Sendable {
         task = nil
     }
 
-    func updateContext(_ newContext: [String: String]) {
+    func updateContext(_ newContext: [String: AnyCodableValue]) {
         lock.lock()
         context = newContext
         lock.unlock()

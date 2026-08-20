@@ -27,13 +27,20 @@ private func isNonBlank(_ value: String?) -> Bool {
     return !value.trimmingCharacters(in: .whitespaces).isEmpty
 }
 
+/// Context values are `AnyCodableValue` since #2293. A caller id supplied as a
+/// number is still a real id, so render before testing blankness rather than
+/// requiring `.string` and silently treating `user_id = 42` as absent.
+private func isNonBlank(_ value: AnyCodableValue?) -> Bool {
+    isNonBlank(value?.displayString)
+}
+
 /// Returns a context guaranteed to carry a non-blank `user_id`. A real caller id
 /// (either the canonical `user_id` or its accepted `userId` alias, mirroring the
 /// engine's ClientContextMapper) is returned unchanged so a real user always
 /// wins. Otherwise a persisted anonymous id is read — or generated and persisted
 /// once — and injected under `user_id`, giving anonymous users sticky
 /// percentage-rollout bucketing.
-func resolveAnonymousContext(_ context: [String: String], store: AnonymousKeyStore) -> [String: String] {
+func resolveAnonymousContext(_ context: [String: AnyCodableValue], store: AnonymousKeyStore) -> [String: AnyCodableValue] {
     if isNonBlank(context["user_id"]) || isNonBlank(context["userId"]) {
         return context
     }
@@ -45,6 +52,6 @@ func resolveAnonymousContext(_ context: [String: String], store: AnonymousKeySto
         store.write(key)
     }
     var copy = context
-    copy["user_id"] = key
+    copy["user_id"] = .string(key)
     return copy
 }

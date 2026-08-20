@@ -17,11 +17,11 @@ final class HttpClient: Sendable {
         self.loader = loader
     }
 
-    func evaluate(context: [String: String], timeout: TimeInterval? = nil) async throws -> EvaluateResponse {
+    func evaluate(context: [String: AnyCodableValue], timeout: TimeInterval? = nil) async throws -> EvaluateResponse {
         try await post(path: "/v1/client/evaluate", body: ["context": context], timeout: timeout)
     }
 
-    func identify(context: [String: String]) async throws -> EvaluateResponse {
+    func identify(context: [String: AnyCodableValue]) async throws -> EvaluateResponse {
         try await post(path: "/v1/client/identify", body: ["context": context])
     }
 

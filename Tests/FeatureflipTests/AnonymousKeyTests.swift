@@ -19,7 +19,8 @@ final class AnonymousKeyTests: XCTestCase {
         let first = resolveAnonymousContext(["plan": "pro"], store: store)
         let id = first["user_id"]
         XCTAssertNotNil(id)
-        XCTAssertFalse(id!.isEmpty)
+        // Values are AnyCodableValue since #2293 — render before string checks.
+        XCTAssertFalse(id?.displayString?.isEmpty ?? true)
         XCTAssertEqual(first["plan"], "pro")
 
         // Second call reads the SAME persisted key.
@@ -44,7 +45,7 @@ final class AnonymousKeyTests: XCTestCase {
     func testBlankUserIdTreatedAsAnonymous() {
         let store = MemoryAnonymousKeyStore()
         let out = resolveAnonymousContext(["user_id": "   "], store: store)
-        let resolved = out["user_id"] ?? ""
+        let resolved = out["user_id"]?.displayString ?? ""
         XCTAssertFalse(resolved.trimmingCharacters(in: .whitespaces).isEmpty)
         XCTAssertNotEqual(resolved, "   ")
     }
