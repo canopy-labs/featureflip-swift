@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.1.0 — 2026-08-24
+
+### Fixed
+
+- Analytics events now survive a transient failure of the events endpoint. The flush emptied the buffer and then called `try? await httpClient.postEvents`, so every 503, timeout and offline blip discarded that batch outright — the HTTP layer detected the failure correctly and `try?` threw the detection away. The public edge answers this endpoint with a 503 at a low but constant rate, so events were being lost steadily. A retryable failure (5xx, 429, transport fault) now returns the batch to the front of the buffer for the next flush; a permanent one (401/403, a malformed body, an encoding failure) is dropped, because retrying those forever would pin a poison batch at the head of the buffer. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+- Flush failures are now reported through `Diagnostics` instead of being silently discarded. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+- `stop()` makes a single final attempt and discards the remainder, rather than restoring a batch into a buffer nothing will ever drain again. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+### Added
+
+- The event buffer is now bounded, at 1000 events, shedding the oldest first. It previously had no bound, which only became reachable now that failed batches are kept. The bound is lower than the server SDKs' 10,000 because this is a mobile client. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+### Changed
+
+- A flush sends one request per batch instead of one for the whole buffer, and the batch-size trigger backs off while the endpoint is failing. A restored batch leaves the buffer at or above the batch size, so without the backoff every later event would start another flush — one request per recorded event. The periodic task remains the retry vehicle. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
+
+
 ## 3.0.0 — 2026-08-20
 
 ### Fixed
