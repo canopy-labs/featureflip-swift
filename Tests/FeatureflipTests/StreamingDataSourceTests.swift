@@ -52,6 +52,43 @@ final class StreamingDataSourceTests: XCTestCase {
         XCTAssertEqual(backoff, 8.0)
     }
 
+    // The SSE drops this backoff absorbs are fleet-wide: one edge event severs every
+    // stream at once (#2457 — measured at a 2.5-3.0ms spread across both eval-api
+    // pods), so every client re-enters the backoff together. A constant delay there
+    // republishes the drop's own synchronisation as a reconnect spike one backoff
+    // later (#2508).
+    func testWithJitterScattersTheDelay() {
+        let base = StreamingDataSource.initialBackoff
+        var samples = Set<TimeInterval>()
+        for _ in 0..<200 {
+            samples.insert(StreamingDataSource.withJitter(base))
+        }
+
+        XCTAssertGreaterThan(
+            samples.count, 1,
+            "reconnect delay is deterministic — a fleet-wide drop reconnects in lockstep"
+        )
+        for delay in samples {
+            XCTAssertGreaterThanOrEqual(delay, base / 2)
+            XCTAssertLessThanOrEqual(delay, base)
+            XCTAssertGreaterThan(delay, 0)  // anti-busy-loop on an immediate failure
+        }
+    }
+
+    func testWithJitterBoundsEveryLadderLevel() {
+        for base in [StreamingDataSource.initialBackoff, 4.0, StreamingDataSource.maxBackoff] {
+            for _ in 0..<50 {
+                let delay = StreamingDataSource.withJitter(base)
+                XCTAssertGreaterThanOrEqual(delay, base / 2)
+                XCTAssertLessThanOrEqual(delay, base)
+            }
+        }
+    }
+
+    func testWithJitterPassesThroughNonPositive() {
+        XCTAssertEqual(StreamingDataSource.withJitter(0), 0)
+    }
+
     func testBackoffCapsAtMax() {
         var backoff = 16.0
         backoff = StreamingDataSource.nextBackoff(backoff)

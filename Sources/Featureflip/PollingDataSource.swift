@@ -25,6 +25,16 @@ final class PollingDataSource: @unchecked Sendable {
         task?.cancel()
         task = Task { [weak self] in
             guard let self else { return }
+            // A `Task` body always runs, even when the task was cancelled before it
+            // was ever scheduled — so without this check `stop()` cannot prevent the
+            // first poll, only the ones after it. `initialize()` then `close()` leaves
+            // a cancelled poller that still issues exactly one request at an arbitrary
+            // later moment, against the context it was constructed with (#2481).
+            //
+            // Kotlin's `scope.launch` never invokes a body cancelled before dispatch,
+            // so this restores parity with the Android SDK's PollingDataSource rather
+            // than inventing new behaviour.
+            if Task.isCancelled { return }
             await self.pollOnce()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(self.interval * 1_000_000_000))

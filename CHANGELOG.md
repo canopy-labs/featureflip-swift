@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.2.0 — 2026-08-26
+
+### Changed
+
+- `flush()` now waits for a drain already in progress instead of returning straight away. The coalescing guard added for [#2456](https://github.com/canopy-labs/featureflip/issues/2456) already stopped a second drain from starting, but it answered the caller-facing half of the question differently from every other SDK: a caller that awaited `flush()` is asking for its events to be sent, and js and node have always resolved only once the send has settled. Shutdown still bypasses coalescing, because it is the last drain there will ever be. ([#2477](https://github.com/canopy-labs/featureflip/issues/2477))
+
+### Fixed
+
+- Stopping the polling data source before its first poll no longer leaks that poll. A Swift `Task` body runs even when the task was cancelled before it was ever scheduled, and `start()` only checked for cancellation *after* the first `pollOnce()` — so an `initialize()` immediately followed by `close()` left a cancelled poller that still issued exactly one evaluate request, at an arbitrary later moment, carrying the context it was constructed with. Kotlin's `scope.launch` never invokes a body cancelled before dispatch, so this restores parity with the Android SDK rather than changing the shared data-source contract; a poller that is not stopped still polls once immediately and then on interval. ([#2481](https://github.com/canopy-labs/featureflip/issues/2481))
+
+- The first SSE reconnect after a healthy stream drops is now jittered to `[d/2, d]`, like every other backoff level. The drops this absorbs are fleet-wide — a single edge event severs every stream at once — so every client re-entered the backoff together and waited an identical delay, republishing the drop's own synchronisation as a reconnect spike one backoff later. Measured in production: a drop spread across 2.5–3.0 ms produced a reconnect spread of 26–46 ms. The delay never exceeds the previous one and stays strictly positive, so a stream that fails immediately still cannot busy-loop. ([#2508](https://github.com/canopy-labs/featureflip/issues/2508))
+
 ## 3.1.0 — 2026-08-24
 
 ### Fixed
@@ -15,7 +27,6 @@
 ### Changed
 
 - A flush sends one request per batch instead of one for the whole buffer, and the batch-size trigger backs off while the endpoint is failing. A restored batch leaves the buffer at or above the batch size, so without the backoff every later event would start another flush — one request per recorded event. The periodic task remains the retry vehicle. ([#2456](https://github.com/canopy-labs/featureflip/issues/2456))
-
 
 ## 3.0.0 — 2026-08-20
 

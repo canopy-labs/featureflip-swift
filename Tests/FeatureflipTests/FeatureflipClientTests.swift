@@ -36,6 +36,58 @@ final class FeatureflipClientTests: XCTestCase {
         FlagValue(value: .double(value), variation: "v1", reason: "RULE")
     }
 
+    /// Waits until the loader has captured at least `count` requests.
+    ///
+    /// Lets a test order itself against the poller's immediate first poll instead of
+    /// hoping that poll lands early. It is a live poller here — nothing cancels it —
+    /// so the poll is guaranteed, but its timing is not (#2481).
+    private func waitForRequestCount(
+        _ loader: MockHTTPLoader,
+        atLeast count: Int,
+        timeout: TimeInterval = 2.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while loader.captured.count < count && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(
+            loader.captured.count,
+            count,
+            "timed out waiting for \(count) captured requests",
+            file: file,
+            line: line
+        )
+    }
+
+    /// Waits until the loader has seen no new request for `quietFor`.
+    ///
+    /// `close()` cancels the poller, but it cannot unmake a poll that was already in
+    /// flight when it ran — so a test that queues a response immediately after
+    /// close() can have that response consumed by the poll instead, leaving its own
+    /// call to throw -1011 against an empty queue. Waiting for quiet makes the
+    /// ordering explicit instead of probable (#2481).
+    private func waitForQuiescence(
+        _ loader: MockHTTPLoader,
+        quietFor: TimeInterval = 0.2,
+        timeout: TimeInterval = 2.0
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastCount = -1
+        var quietSince = Date()
+        while Date() < deadline {
+            let count = loader.captured.count
+            if count != lastCount {
+                lastCount = count
+                quietSince = Date()
+            } else if Date().timeIntervalSince(quietSince) >= quietFor {
+                return
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
     // MARK: - Tests
 
     func testInitializeFetchesFlags() async {
@@ -119,11 +171,17 @@ final class FeatureflipClientTests: XCTestCase {
 
         XCTAssertEqual(client.boolVariation("feature", default: true), false)
 
+        // Wait for the poller's immediate first poll before queueing identify's
+        // response. Enqueueing while that poll is still pending is a coin flip: the
+        // poller consumes the response and identify() throws -1011 against an empty
+        // queue instead (#2481).
+        try await waitForRequestCount(loader, atLeast: 2)
+
         // NOT closed here. This used to close the handle to quiet the background
         // poller and then keep using it, which depended on a closed client still
-        // evaluating — the bug #2327 fixes. identify() is the only consumer of the
-        // mock response regardless: doInitialize() awaits evaluate() before
-        // startDataSource(), and the poll interval is 30s.
+        // evaluating — the bug #2327 fixes. What kept identify() the only consumer of
+        // the mock response was then left to chance; the wait above is what actually
+        // establishes it.
 
         // Identify with new context — returns updated flags
         let updatedFlags: [String: FlagValue] = [
@@ -194,7 +252,7 @@ final class FeatureflipClientTests: XCTestCase {
         let deadline = Date().addingTimeInterval(2.0)
         var eventsRequest: URLRequest?
         while eventsRequest == nil && Date() < deadline {
-            eventsRequest = loader.capturedRequests.first { req in
+            eventsRequest = loader.captured.first { req in
                 req.url?.path.contains("events") == true
             }
             if eventsRequest == nil {
@@ -322,7 +380,7 @@ final class FeatureflipClientTests: XCTestCase {
 
         try await client.identify(context: ["user_id": "test-user"])
 
-        XCTAssertTrue(loader.capturedRequests.isEmpty, "identify() on test client should not make network calls")
+        XCTAssertTrue(loader.captured.isEmpty, "identify() on test client should not make network calls")
         XCTAssertEqual(client.boolVariation("flag", default: false), true)
     }
 
@@ -335,7 +393,7 @@ final class FeatureflipClientTests: XCTestCase {
         // The key assertion: even after flush(), no HTTP requests were made.
         await client.flush()
 
-        XCTAssertTrue(loader.capturedRequests.isEmpty, "flush() on test client should not make network calls")
+        XCTAssertTrue(loader.captured.isEmpty, "flush() on test client should not make network calls")
     }
 
     func testStartDataSourceUsesCurrentContextAfterIdentify() async throws {
@@ -358,30 +416,43 @@ final class FeatureflipClientTests: XCTestCase {
         await client.initialize()
         await client.close()
 
-        let requestCountBeforeIdentify = loader.capturedRequests.count
+        // Let any poll that was already in flight when close() ran land before
+        // queueing identify's response — otherwise that poll consumes it (#2481).
+        try await waitForQuiescence(loader)
 
         // Identify with new context
         loader.enqueue(statusCode: 200, body: makeEvaluateResponseData(flags: flags))
         try await client.identify(context: ["user_id": "user-b"])
 
-        let requestCountAfterIdentify = loader.capturedRequests.count
-
         // Call startDataSource — should create a poller with "user-b" context
         loader.enqueue(statusCode: 200, body: makeEvaluateResponseData(flags: flags))
         client.startDataSource()
 
-        // Wait for the poller to make its first request
+        // Assert on what was polled, not on which request happened to arrive last.
+        // Reading `capturedRequests.last` made the outcome depend on where a stray
+        // poll landed rather than on the context the new poller was built with — the
+        // thing under test (#2481). identify() posts to /identify, so filtering on
+        // /evaluate leaves only polls.
         let deadline = Date().addingTimeInterval(2.0)
-        while loader.capturedRequests.count <= requestCountAfterIdentify && Date() < deadline {
-            try await Task.sleep(nanoseconds: 50_000_000)
+        var polledForUserB = false
+        while !polledForUserB && Date() < deadline {
+            polledForUserB = loader.captured.contains { request in
+                guard request.url?.path.hasSuffix("/evaluate") == true,
+                      let body = request.httpBody,
+                      let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                      let context = json["context"] as? [String: String]
+                else { return false }
+                return context["user_id"] == "user-b"
+            }
+            if !polledForUserB {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
         }
 
-        // The last request should use "user-b" context
-        let lastRequest = try XCTUnwrap(loader.capturedRequests.last)
-        let body = try XCTUnwrap(lastRequest.httpBody)
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let context = try XCTUnwrap(json["context"] as? [String: String])
-        XCTAssertEqual(context["user_id"], "user-b")
+        XCTAssertTrue(
+            polledForUserB,
+            "startDataSource() must poll with the context identify() set, not the one the client was configured with"
+        )
 
         await client.close()
     }
@@ -395,6 +466,6 @@ final class FeatureflipClientTests: XCTestCase {
         // Give any fire-and-forget Task a chance to execute
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        XCTAssertTrue(loader.capturedRequests.isEmpty, "track() on test client should not enqueue or send events")
+        XCTAssertTrue(loader.captured.isEmpty, "track() on test client should not enqueue or send events")
     }
 }

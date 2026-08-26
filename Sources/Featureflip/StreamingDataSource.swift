@@ -140,6 +140,21 @@ final class StreamingDataSource: @unchecked Sendable {
         min(current * 2, maxBackoff)
     }
 
+    /// Returns a value in [d/2, d] to de-correlate reconnects across many SDK
+    /// instances (thundering-herd avoidance after a shared outage).
+    ///
+    /// Applied to EVERY reconnect, including the first. The drops this absorbs are
+    /// fleet-wide — one edge event severs every stream at once (#2457) — so every
+    /// client re-enters the backoff together. Sleeping the raw ladder value there
+    /// republished the drop's own synchronisation as a reconnect spike one backoff
+    /// later (#2508). The band stays strictly positive, so a stream that fails
+    /// immediately still cannot busy-loop.
+    static func withJitter(_ delay: TimeInterval) -> TimeInterval {
+        guard delay > 0 else { return delay }
+        let half = delay / 2
+        return half + TimeInterval.random(in: 0...half)
+    }
+
     // MARK: - Private
 
     private func connectLoop() async {
@@ -165,7 +180,9 @@ final class StreamingDataSource: @unchecked Sendable {
             retryCount += 1
             lock.unlock()
 
-            try? await Task.sleep(nanoseconds: UInt64(currentBackoff * 1_000_000_000))
+            // The ladder state (backoff) stays un-jittered so the doubling is exact;
+            // only the scheduled wait is scattered.
+            try? await Task.sleep(nanoseconds: UInt64(Self.withJitter(currentBackoff) * 1_000_000_000))
 
             lock.lock()
             backoff = Self.nextBackoff(backoff)

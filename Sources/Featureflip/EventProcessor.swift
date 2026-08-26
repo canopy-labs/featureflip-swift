@@ -46,6 +46,16 @@ actor EventProcessor {
     /// re-opening the very hazard this exists to close.
     private var activeDrains = 0
 
+    /// The drain `flush()` started, while it is still running.
+    ///
+    /// `activeDrains` can only say THAT a drain is running; a caller that must WAIT for
+    /// one needs something to await. Until #2477 `flush()` returned as soon as it saw a
+    /// drain in flight, which is a weaker promise than every other SDK makes: js and node
+    /// have always returned the in-flight promise, so `await flush()` there resolves only
+    /// once the send has settled. A caller that awaited `flush()` is asking for its events
+    /// to be sent, and handing back early is a promise the SDK has not kept.
+    private var inFlightDrain: Task<Void, Never>?
+
     private var closed = false
 
     init(
@@ -106,9 +116,34 @@ actor EventProcessor {
     func flush() async {
         // Coalesce: a drain is already emptying the buffer, and a second one would
         // only duplicate the request stream and let its success clear a backoff the
-        // first one's failure just armed.
+        // first one's failure just armed. Awaited rather than skipped — see
+        // `inFlightDrain`.
+        if let existing = inFlightDrain {
+            await existing.value
+            return
+        }
+
+        // `stop()`'s final drain bypasses coalescing and publishes no handle, so there
+        // is nothing to await. It is also the last drain there will ever be, which
+        // leaves a second one nothing useful to do.
         guard activeDrains == 0 else { return }
-        await drain()
+
+        let task = Task { [weak self] in
+            await self?.drain()
+            await self?.releaseDrainHandle()
+        }
+        inFlightDrain = task
+        await task.value
+    }
+
+    /// Clears the coalescing handle once its drain has finished.
+    ///
+    /// Only the task that set the handle clears it, and a caller arriving in the window
+    /// between the drain finishing and this running awaits an already-finished task and
+    /// returns — the same harmless window js has between its loop ending and
+    /// `flushPromise` being nulled.
+    private func releaseDrainHandle() {
+        inFlightDrain = nil
     }
 
     /// The drain loop itself, callable when coalescing must be bypassed.
