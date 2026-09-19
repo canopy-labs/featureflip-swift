@@ -93,4 +93,32 @@ final class PollingDataSourceTests: XCTestCase {
 
         XCTAssertEqual(loader.captured.count, 1, "start() must make exactly one immediate poll")
     }
+
+    func testAPollAlreadyOnTheWireDoesNotDeliverAfterStop() async throws {
+        // Cancelling the task cannot recall a response that has already arrived, so
+        // without an explicit guard onChange still fires. That is only harmless while
+        // a poller is stopped alongside everything else — #3075 retires the fallback
+        // poller while the recovered stream is live, so a late response would REPLACE
+        // the store on top of the stream's fresher snapshot and stay wrong until the
+        // flag next changed.
+        let loader = MockHTTPLoader()
+        let body = """
+        {"flags":{"f1":{"value":true,"variation":"on","reason":"Fallthrough"}}}
+        """.data(using: .utf8)!
+        loader.enqueue(statusCode: 200, body: body)
+
+        let httpClient = HttpClient(baseUrl: "https://test.com", clientKey: "csk_t", loader: loader)
+        var called = false
+        let poller = PollingDataSource(
+            httpClient: httpClient,
+            context: ["user_id": "u1"],
+            interval: 300,
+            onChange: { _ in called = true }
+        )
+
+        poller.stop()
+        await poller.pollOnce()
+
+        XCTAssertFalse(called, "a response that arrives after stop() must not reach the store")
+    }
 }

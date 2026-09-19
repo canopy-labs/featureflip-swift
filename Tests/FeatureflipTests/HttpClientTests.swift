@@ -69,7 +69,7 @@ final class HttpClientTests: XCTestCase {
         try await client.postEvents([event])
 
         let req = loader.capturedRequests[0]
-        XCTAssertEqual(req.url?.path, "/v1/sdk/events")
+        XCTAssertEqual(req.url?.path, "/v1/client/events")
         XCTAssertEqual(req.httpMethod, "POST")
     }
 

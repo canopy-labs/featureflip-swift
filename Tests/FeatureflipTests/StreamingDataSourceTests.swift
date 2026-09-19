@@ -145,15 +145,17 @@ final class StreamingDataSourceTests: XCTestCase {
         XCTAssertTrue(deltas.all.first?.keys.contains("flag-b") ?? false)
     }
 
-    // GAP-A: a stream that stays down must exhaust its retries and hand off to the
-    // polling fallback rather than giving up. This drives the real connect loop to
-    // the cap — the wiring the core relies on to call handleStreamingFallback().
-    // Port 1 is never listening, so every attempt fails fast (connection refused),
-    // which is the swift analogue of the android test's repeated 500s.
-    func testStreamThatStaysDownReachesRetryCapAndSignalsFallback() {
+    // GAP-A: a stream that stays down must exhaust its retry budget and hand off to
+    // the polling fallback — and then KEEP RETRYING underneath it (#3075). Returning
+    // out of the connect loop at the cap left the app blind to real-time updates,
+    // kill switches included, until it was restarted. This drives the real connect
+    // loop: port 1 is never listening, so every attempt fails fast (connection
+    // refused), the swift analogue of the android test's repeated 500s.
+    func testStreamThatStaysDownArmsTheFallbackOnceAndKeepsRetrying() {
         // DispatchSemaphore is Sendable, so it can be signalled from the source's
         // @Sendable callback without an unchecked-Sendable box.
         let reachedCap = DispatchSemaphore(value: 0)
+        let armings = Counter()
 
         let ds = StreamingDataSource(
             baseUrl: "http://127.0.0.1:1",
@@ -161,7 +163,7 @@ final class StreamingDataSourceTests: XCTestCase {
             context: ["user_id": "u1"],
             onChange: { _ in },
             onSnapshot: { _ in },
-            onMaxRetriesReached: { reachedCap.signal() },
+            onFallbackToPolling: { armings.increment(); reachedCap.signal() },
             // Keep the 5-retry schedule but collapse its wall-clock.
             initialBackoff: 0.01
         )
@@ -170,9 +172,100 @@ final class StreamingDataSourceTests: XCTestCase {
         XCTAssertEqual(
             reachedCap.wait(timeout: .now() + 10),
             .success,
-            "onMaxRetriesReached should fire so the core can fall back to polling"
+            "onFallbackToPolling should fire so the core can start polling"
         )
-        XCTAssertTrue(ds.isMaxRetriesReached)
+        XCTAssertTrue(ds.hasFallenBackToPolling)
+
+        // The loop must still be reconnecting well past the cap.
+        let target = StreamingDataSource.maxRetries + 3
+        let deadline = Date().addingTimeInterval(10)
+        while ds.retryAttempts < target && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let attempts = ds.retryAttempts
         ds.stop()
+
+        XCTAssertGreaterThan(
+            attempts,
+            StreamingDataSource.maxRetries,
+            "the stream must keep retrying past the cap, not give up"
+        )
+        XCTAssertEqual(
+            armings.value,
+            1,
+            "the fallback arms once per outage, not once per retry"
+        )
+    }
+
+    // The other half of #3075: a stream that comes back must RETIRE the poller that
+    // was covering for it. Signalled off a delivered CONFIG frame rather than a 200 —
+    // the client stream's first frame is `connection-ready`, which carries none — and
+    // from inside the read loop rather than on its return: `connect()` blocks for the
+    // whole lifetime of a healthy stream, so a reap on return would leave the poller
+    // running beside it the entire time, its periodic whole-store replaces reverting
+    // the deltas the stream applies.
+    func testDeliveredConfigRetiresTheFallbackExactlyOnce() {
+        let reachedCap = DispatchSemaphore(value: 0)
+        let recovered = DispatchSemaphore(value: 0)
+        let recoveries = Counter()
+
+        let ds = StreamingDataSource(
+            baseUrl: "http://127.0.0.1:1",
+            clientKey: "key",
+            context: ["user_id": "u1"],
+            onChange: { _ in },
+            onSnapshot: { _ in },
+            onFallbackToPolling: { reachedCap.signal() },
+            onStreamRecovered: { recoveries.increment(); recovered.signal() },
+            initialBackoff: 0.01
+        )
+        ds.start()
+
+        XCTAssertEqual(reachedCap.wait(timeout: .now() + 10), .success)
+        XCTAssertTrue(ds.hasFallenBackToPolling)
+
+        // What `connect()` calls on each `flags-updated` frame it reads, after
+        // applying it. Driven directly here because URLSession.bytes(for:) cannot be
+        // mocked — macOS CI compiles the call site, this asserts the state machine
+        // behind it.
+        ds.configDelivered()
+
+        XCTAssertEqual(
+            recovered.wait(timeout: .now() + 5),
+            .success,
+            "a delivered config frame must retire the fallback poller"
+        )
+        XCTAssertFalse(ds.hasFallenBackToPolling)
+        XCTAssertEqual(ds.retryAttempts, 0, "a delivered config frame resets the retry budget")
+
+        // Every subsequent config frame on the same healthy stream must stay quiet.
+        ds.configDelivered()
+        ds.configDelivered()
+        ds.stop()
+
+        XCTAssertEqual(
+            recoveries.value,
+            1,
+            "recovery is signalled once per outage, not once per config frame"
+        )
+    }
+}
+
+/// Minimal thread-safe counter. `NSLock` + a boxed `Int` rather than an actor: the
+/// callbacks under test are synchronous and `@Sendable`, so they cannot await.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
     }
 }

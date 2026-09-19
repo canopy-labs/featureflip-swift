@@ -84,6 +84,8 @@ await client.track("checkout-completed", metadata: ["total": .number(99.99)])
 await client.flush()
 ```
 
+Featureflip counts each event name, per environment. The metadata you pass is transmitted with the event but is not stored, and event counts are not surfaced in the app or API.
+
 ## SwiftUI Integration
 
 ```swift

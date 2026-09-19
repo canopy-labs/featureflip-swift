@@ -174,7 +174,7 @@ struct EvaluateResponse: Decodable {
     let full: Bool?
 }
 
-/// An analytics event sent to /v1/sdk/events.
+/// An analytics event sent to /v1/client/events.
 struct SdkEvent: Encodable {
     let type: String
     let flagKey: String?

@@ -7,6 +7,15 @@ final class PollingDataSource: @unchecked Sendable {
     private let interval: TimeInterval
     private let onChange: @Sendable ([String: FlagValue]) -> Void
     private var task: Task<Void, Never>?
+    // Cancelling the task cannot recall a poll whose response has already arrived, so
+    // `onChange` would still fire. That used to be harmless, because a poller was only
+    // ever stopped alongside everything else — but #3075 retires the fallback poller
+    // while the recovered stream is live, so a late response would REPLACE the store
+    // on top of the stream's fresher connect snapshot. Any flag that changed between
+    // the two server-side evaluations would revert, and because the stream already
+    // delivered that change IN the snapshot, later deltas would merge on top of the
+    // stale value and never correct it.
+    private var stopped = false
     private let lock = NSLock()
 
     init(
@@ -23,6 +32,9 @@ final class PollingDataSource: @unchecked Sendable {
 
     func start() {
         task?.cancel()
+        lock.lock()
+        stopped = false
+        lock.unlock()
         task = Task { [weak self] in
             guard let self else { return }
             // A `Task` body always runs, even when the task was cancelled before it
@@ -45,6 +57,9 @@ final class PollingDataSource: @unchecked Sendable {
     }
 
     func stop() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
         task?.cancel()
         task = nil
     }
@@ -61,6 +76,10 @@ final class PollingDataSource: @unchecked Sendable {
         lock.unlock()
         do {
             let result = try await httpClient.evaluate(context: currentContext)
+            lock.lock()
+            let isStopped = stopped
+            lock.unlock()
+            if isStopped { return }
             onChange(result.flags)
         } catch {
             // Silent — don't crash on network errors

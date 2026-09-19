@@ -28,7 +28,10 @@ final class HttpClient: Sendable {
     func postEvents(_ events: [SdkEvent]) async throws {
         let body = RecordEventsRequest(events: events)
         let data = try JSONEncoder().encode(body)
-        var request = try makeRequest(path: "/v1/sdk/events", method: "POST")
+        // The CLIENT surface, like every other call this SDK makes. /v1/sdk/events accepts
+        // server keys only, so it answered this one with a 401 — which the event processor
+        // classifies as permanent, discarding every batch (#3069).
+        var request = try makeRequest(path: "/v1/client/events", method: "POST")
         request.httpBody = data
         let (_, response) = try await loader.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {

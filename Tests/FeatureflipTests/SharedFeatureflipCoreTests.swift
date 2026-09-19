@@ -69,9 +69,9 @@ final class SharedFeatureflipCoreTests: XCTestCase {
         core.release()
     }
 
-    // MARK: - Streaming -> polling fallback tears down the dormant stream
+    // MARK: - Streaming -> polling fallback is additive, and retired on recovery
 
-    func testStreamingFallbackStopsAndNullsStreamThenStartsPolling() {
+    func testStreamingFallbackKeepsTheStreamAndIsRetiredOnRecovery() {
         let loader = MockHTTPLoader()
         // The fallback poller's immediate poll returns an empty snapshot.
         loader.enqueue(statusCode: 200, body: #"{"flags":{}}"#.data(using: .utf8)!)
@@ -92,13 +92,39 @@ final class SharedFeatureflipCoreTests: XCTestCase {
         core.startDataSource()
         XCTAssertTrue(core.hasStreamingSource)
 
-        // Simulate the stream exhausting its retries (the onMaxRetriesReached callback).
+        // Simulate the stream exhausting its retries (the onFallbackToPolling callback).
         core.handleStreamingFallback()
 
-        // The dormant stream must be torn down so a later foreground/identify cannot
-        // resurrect it alongside the poller (both live -> stale-overwrite flicker).
-        XCTAssertFalse(core.hasStreamingSource, "streaming source should be stopped and nulled on fallback")
-        XCTAssertTrue(core.hasPollingSource, "polling should take over after fallback")
+        // The stream is KEPT: it is still retrying underneath, and polling only covers
+        // the outage until it comes back. Nulling it here is what used to make the
+        // fallback permanent — nothing would ever have restarted streaming (#3075).
+        XCTAssertTrue(
+            core.hasStreamingSource,
+            "streaming source must survive the fallback so it can still recover"
+        )
+        XCTAssertTrue(core.hasPollingSource, "polling should cover the outage")
+
+        // A second arming must not leak a second poller.
+        core.handleStreamingFallback()
+        XCTAssertTrue(core.hasPollingSource)
+
+        // Simulate the stream delivering a frame again (the onStreamRecovered callback).
+        core.stopFallbackPolling()
+
+        XCTAssertFalse(
+            core.hasPollingSource,
+            "the fallback poller must be retired once the stream recovers"
+        )
+        XCTAssertTrue(core.hasStreamingSource)
+
+        // The reference is cleared too, so a later outage falls back again rather than
+        // finding a dead poller parked there.
+        loader.enqueue(statusCode: 200, body: #"{"flags":{}}"#.data(using: .utf8)!)
+        core.handleStreamingFallback()
+        XCTAssertTrue(
+            core.hasPollingSource,
+            "a second outage must be covered by a fresh poller"
+        )
 
         core.release()
     }

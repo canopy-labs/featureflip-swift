@@ -17,10 +17,17 @@ final class StreamingDataSource: @unchecked Sendable {
     private var context: [String: AnyCodableValue]
     private let onChange: @Sendable ([String: FlagValue]) -> Void
     // Full snapshot the server sends first on every (re)connect -> apply as a REPLACE.
-    private let onSnapshot: (@Sendable ([String: FlagValue]) -> Void)?
-    // Invoked when the stream has failed maxRetries times so the core can fall back
-    // to polling (which retries forever). Never a terminal give-up.
-    private let onMaxRetriesReached: (@Sendable () -> Void)?
+    // Required, not optional-defaulting-to-onChange: an omitted snapshot handler would
+    // silently merge the connect snapshot and resurrect flags deleted during the outage
+    // (#1873), and no dispatch test can see that -- they all pass it explicitly.
+    private let onSnapshot: @Sendable ([String: FlagValue]) -> Void
+    // Invoked ONCE per outage, when the stream has failed maxRetries times, so the
+    // core can start polling ALONGSIDE this still-retrying stream. Never a terminal
+    // give-up: the connect loop keeps going at the capped backoff (#3075).
+    private let onFallbackToPolling: (@Sendable () -> Void)?
+    // Invoked when a stream that had fallen back delivers a frame again, so the core
+    // can retire the fallback poller.
+    private let onStreamRecovered: (@Sendable () -> Void)?
     private var task: Task<Void, Never>?
     // The delay the first reconnect waits, and the value backoff resets to. Held as
     // an instance property (rather than reading the static directly) so tests can
@@ -29,6 +36,15 @@ final class StreamingDataSource: @unchecked Sendable {
     private let baseBackoff: TimeInterval
     private var backoff: TimeInterval
     private var retryCount = 0
+    // True between arming the polling fallback and the next delivered frame. Gates
+    // both callbacks so each fires once per outage rather than once per retry.
+    //
+    // Deliberately NOT cleared by `start()`: that is reachable from
+    // `handleForeground()` and `updateContext()` while a fallback poller is live, and
+    // clearing it there would lose the only record that a poller is waiting to be
+    // retired — leaving it running beside a recovered stream forever, which is the
+    // defect this fixes.
+    private var fallbackActive = false
     private let lock = NSLock()
 
     init(
@@ -36,8 +52,9 @@ final class StreamingDataSource: @unchecked Sendable {
         clientKey: String,
         context: [String: AnyCodableValue],
         onChange: @escaping @Sendable ([String: FlagValue]) -> Void,
-        onSnapshot: (@Sendable ([String: FlagValue]) -> Void)? = nil,
-        onMaxRetriesReached: (@Sendable () -> Void)? = nil,
+        onSnapshot: @escaping @Sendable ([String: FlagValue]) -> Void,
+        onFallbackToPolling: (@Sendable () -> Void)? = nil,
+        onStreamRecovered: (@Sendable () -> Void)? = nil,
         initialBackoff: TimeInterval = StreamingDataSource.initialBackoff
     ) {
         self.baseUrl = baseUrl
@@ -45,7 +62,8 @@ final class StreamingDataSource: @unchecked Sendable {
         self.context = context
         self.onChange = onChange
         self.onSnapshot = onSnapshot
-        self.onMaxRetriesReached = onMaxRetriesReached
+        self.onFallbackToPolling = onFallbackToPolling
+        self.onStreamRecovered = onStreamRecovered
         self.baseBackoff = initialBackoff
         self.backoff = initialBackoff
     }
@@ -76,10 +94,21 @@ final class StreamingDataSource: @unchecked Sendable {
         start()
     }
 
-    var isMaxRetriesReached: Bool {
+    /// Whether the polling fallback is currently armed — i.e. the stream has
+    /// exhausted its retry budget and has not delivered a frame since. Visible for
+    /// testing; the stream keeps retrying regardless.
+    var hasFallenBackToPolling: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return retryCount >= Self.maxRetries
+        return fallbackActive
+    }
+
+    /// Consecutive failed connect attempts. Visible for testing, so a test can show
+    /// the loop still reconnecting past `maxRetries`.
+    var retryAttempts: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return retryCount
     }
 
     // MARK: - Internal (visible for testing)
@@ -159,34 +188,41 @@ final class StreamingDataSource: @unchecked Sendable {
 
     private func connectLoop() async {
         while !Task.isCancelled {
-            lock.lock()
-            let currentRetryCount = retryCount
-            let currentBackoff = backoff
-            lock.unlock()
-
-            guard currentRetryCount < Self.maxRetries else {
-                // Not terminal: hand off to the polling fallback (retries forever).
-                onMaxRetriesReached?()
-                return
-            }
-
             do {
                 try await connect()
             } catch {
                 if Task.isCancelled { return }
             }
+            if Task.isCancelled { return }
 
+            // Read the ladder AFTER connect(), not before: a healthy connection can
+            // last hours and resets the ladder from inside, so a value captured up
+            // front would make the first reconnect after it sleep the pre-outage
+            // delay — up to the 30s cap — instead of the base.
             lock.lock()
             retryCount += 1
-            lock.unlock()
-
+            let armFallback = retryCount >= Self.maxRetries && !fallbackActive
+            if armFallback { fallbackActive = true }
             // The ladder state (backoff) stays un-jittered so the doubling is exact;
             // only the scheduled wait is scattered.
-            try? await Task.sleep(nanoseconds: UInt64(Self.withJitter(currentBackoff) * 1_000_000_000))
-
-            lock.lock()
+            let currentBackoff = backoff
             backoff = Self.nextBackoff(backoff)
             lock.unlock()
+
+            // The fallback is ADDITIVE, never terminal (#3075). Polling covers the
+            // outage while this loop keeps retrying the stream underneath at the
+            // capped backoff, and the next config frame retires the poller. Returning
+            // here instead left the app polling — and blind to real-time updates, kill
+            // switches included — until it was restarted, after only ~31s of
+            // unreachability.
+            //
+            // Armed on the failure itself rather than at the top of the next
+            // iteration, so the poller starts covering the outage ~15s in rather than
+            // after the fifth backoff has also elapsed (~31s) — matching flutter and
+            // the js core.
+            if armFallback { onFallbackToPolling?() }
+
+            try? await Task.sleep(nanoseconds: UInt64(Self.withJitter(currentBackoff) * 1_000_000_000))
         }
     }
 
@@ -202,24 +238,53 @@ final class StreamingDataSource: @unchecked Sendable {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
 
-        // Reset backoff on successful connection.
-        lock.lock()
-        backoff = baseBackoff
-        retryCount = 0
-        lock.unlock()
-
         var lineBuffer: [String] = []
         for try await line in bytes.lines {
             if Task.isCancelled { return }
             if line.isEmpty {
                 if let event = Self.parseSSEEvent(from: lineBuffer) {
                     handleEvent(event)
+                    // AFTER the store has been updated, never before: retiring the
+                    // fallback poller is what this signals, and a poller retired one
+                    // frame early can still land an older whole-store replace on top
+                    // of the snapshot just applied.
+                    if event.eventType == "flags-updated" { configDelivered() }
                 }
                 lineBuffer = []
             } else {
                 lineBuffer.append(line)
             }
         }
+    }
+
+    /// DELIVERED CONFIG — not merely an accepted socket — is what proves the stream
+    /// healthy, and it is the condition the rest of the fleet resets on (js and java
+    /// on `sync`, go on its first complete frame, which for the server stream *is*
+    /// `sync`). Resetting on the 200 instead let an accept-then-close server clear the
+    /// counter every cycle, so the retry budget was never exhausted, the polling
+    /// fallback could never arm, and the app saw nothing at all for the duration of
+    /// such an outage (#3074).
+    ///
+    /// Keyed on `flags-updated` rather than on any frame because the client stream's
+    /// FIRST frame is `connection-ready`, a ~40-byte handshake carrying no config: a
+    /// server that accepts, greets and dies would otherwise reset the budget forever
+    /// and re-open exactly the hole above. Deliberately still counted when the payload
+    /// fails to parse — the stream itself is demonstrably up, the store keeps its
+    /// last-known-good, and the parse failure is reported on its own path.
+    ///
+    /// Recovery is signalled from HERE rather than from `connectLoop()`: `connect()`
+    /// blocks reading lines for the whole lifetime of a healthy stream, so a reap on
+    /// its return would leave the poller alive that entire time, its periodic
+    /// whole-store replaces reverting the deltas this stream applies.
+    func configDelivered() {
+        lock.lock()
+        retryCount = 0
+        backoff = baseBackoff
+        let recovered = fallbackActive
+        fallbackActive = false
+        lock.unlock()
+
+        if recovered { onStreamRecovered?() }
     }
 
     func handleEvent(_ event: SSEEvent) {
@@ -233,7 +298,7 @@ final class StreamingDataSource: @unchecked Sendable {
             // Keyed off the explicit marker, not event order, so a delta racing ahead
             // of the snapshot can't be mistaken for a full replace.
             if response.full == true {
-                (onSnapshot ?? onChange)(response.flags)
+                onSnapshot(response.flags)
             } else {
                 onChange(response.flags)
             }
