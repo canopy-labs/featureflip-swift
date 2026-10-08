@@ -17,6 +17,17 @@ public struct FeatureflipConfig: Sendable {
     /// client created per `clientKey` — later clients share that core's config,
     /// like every other option.
     public let inspectors: [EvaluationInspector]
+    /// Report the flags this app reads (the typed variation methods and `flagDetail`),
+    /// so the server can tell which client-side flags are still in use and refuses to
+    /// archive them. On by default. Each flag, variation and user is reported about
+    /// once an hour per device, and again each time the app returns to the foreground.
+    ///
+    /// When off, no reads are reported and the server instead records every flag it
+    /// sends this client as evaluated, so no client-side flag served to it ever looks
+    /// unused.
+    ///
+    /// Honored on the first client created per `clientKey`, like every other option.
+    public let sendEvaluationEvents: Bool
 
     public init(
         clientKey: String,
@@ -27,7 +38,8 @@ public struct FeatureflipConfig: Sendable {
         flushInterval: TimeInterval = 30,
         flushBatchSize: Int = 100,
         initTimeout: TimeInterval = 10,
-        inspectors: [EvaluationInspector] = []
+        inspectors: [EvaluationInspector] = [],
+        sendEvaluationEvents: Bool = true
     ) {
         self.clientKey = clientKey
         self.baseUrl = baseUrl
@@ -40,5 +52,6 @@ public struct FeatureflipConfig: Sendable {
         self.flushBatchSize = flushBatchSize
         self.initTimeout = initTimeout
         self.inspectors = inspectors
+        self.sendEvaluationEvents = sendEvaluationEvents
     }
 }

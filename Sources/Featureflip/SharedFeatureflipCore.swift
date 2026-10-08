@@ -36,7 +36,30 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
 
     /// Decrements the reference count. Calls shutdown() exactly once when it hits zero.
     func release() {
-        let shouldShutDown: Bool = refcountLock.withLock {
+        if releaseReference() {
+            shutdown()
+        }
+    }
+
+    /// Releases one handle's reference, for `FeatureflipClient.close()`.
+    ///
+    /// Only the last handle stops the shared data sources and event processor, and it
+    /// awaits the processor's final flush. An earlier handle only flushes: stopping them
+    /// would stop them for every other handle on this clientKey too, which would keep
+    /// serving a snapshot that never updates while the stopped processor rejected all of
+    /// its reads, so flags it still uses would look unread (#3566).
+    func closeHandle() async {
+        if releaseReference() {
+            removeFromLiveCores()
+            await close()
+        } else {
+            await flush()
+        }
+    }
+
+    /// Decrements the reference count. True exactly once: for the release that hits zero.
+    private func releaseReference() -> Bool {
+        refcountLock.withLock {
             guard _refCount > 0 else { return false }
             _refCount -= 1
             if _refCount == 0 && !_isShutDown {
@@ -44,9 +67,6 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
                 return true
             }
             return false
-        }
-        if shouldShutDown {
-            shutdown()
         }
     }
 
@@ -86,6 +106,9 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     private let httpClient: HttpClient
     private let cache: FlagCache
     let eventProcessor: EventProcessor
+    /// Reports the flags app code reads as `Evaluation` events. Nil when
+    /// `config.sendEvaluationEvents` is off, and on test cores, which make no network calls.
+    let readRecorder: ReadRecorder?
     private var streamingDataSource: StreamingDataSource?
     private var pollingDataSource: PollingDataSource?
     private var lifecycleObserver: LifecycleObserver?
@@ -96,31 +119,64 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     /// Creates a new core with real HTTP transport.
     init(config: FeatureflipConfig, anonymousKeyStore: AnonymousKeyStore = UserDefaultsAnonymousKeyStore()) {
         self.config = config
-        self.httpClient = HttpClient(baseUrl: config.baseUrl, clientKey: config.clientKey)
+        self.httpClient = HttpClient(
+            baseUrl: config.baseUrl,
+            clientKey: config.clientKey,
+            reportsEvaluations: config.sendEvaluationEvents
+        )
         self.cache = FlagCache(clientKey: config.clientKey)
-        self.eventProcessor = EventProcessor(
+        let processor = EventProcessor(
             httpClient: httpClient,
             flushInterval: config.flushInterval,
             batchSize: config.flushBatchSize
         )
+        self.eventProcessor = processor
         self.isTestClient = false
         self.anonymousKeyStore = anonymousKeyStore
-        self._currentContext = resolveAnonymousContext(config.context, store: anonymousKeyStore)
+        let context = resolveAnonymousContext(config.context, store: anonymousKeyStore)
+        self._currentContext = context
+        self.readRecorder = SharedFeatureflipCore.makeReadRecorder(
+            config: config,
+            context: context,
+            eventProcessor: processor,
+            sink: nil
+        )
     }
 
     /// Internal init for unit testing with a custom HTTP loader.
-    init(config: FeatureflipConfig, loader: HTTPDataLoader, anonymousKeyStore: AnonymousKeyStore = UserDefaultsAnonymousKeyStore()) {
+    ///
+    /// `readSink` replaces the event processor as the destination for recorded reads, so
+    /// a test can see each one synchronously. Nil (the default) wires the real processor.
+    init(
+        config: FeatureflipConfig,
+        loader: HTTPDataLoader,
+        anonymousKeyStore: AnonymousKeyStore = UserDefaultsAnonymousKeyStore(),
+        readSink: (@Sendable (SdkEvent) -> Void)? = nil
+    ) {
         self.config = config
-        self.httpClient = HttpClient(baseUrl: config.baseUrl, clientKey: config.clientKey, loader: loader)
+        self.httpClient = HttpClient(
+            baseUrl: config.baseUrl,
+            clientKey: config.clientKey,
+            loader: loader,
+            reportsEvaluations: config.sendEvaluationEvents
+        )
         self.cache = FlagCache(clientKey: config.clientKey)
-        self.eventProcessor = EventProcessor(
+        let processor = EventProcessor(
             httpClient: httpClient,
             flushInterval: config.flushInterval,
             batchSize: config.flushBatchSize
         )
+        self.eventProcessor = processor
         self.isTestClient = false
         self.anonymousKeyStore = anonymousKeyStore
-        self._currentContext = resolveAnonymousContext(config.context, store: anonymousKeyStore)
+        let context = resolveAnonymousContext(config.context, store: anonymousKeyStore)
+        self._currentContext = context
+        self.readRecorder = SharedFeatureflipCore.makeReadRecorder(
+            config: config,
+            context: context,
+            eventProcessor: processor,
+            sink: readSink
+        )
     }
 
     /// Private init for test clients with static overrides.
@@ -141,6 +197,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             flushInterval: dummyConfig.flushInterval,
             batchSize: dummyConfig.flushBatchSize
         )
+        self.readRecorder = nil
         self.isTestClient = true
         self.anonymousKeyStore = UserDefaultsAnonymousKeyStore()
         self._currentContext = dummyConfig.context
@@ -173,12 +230,43 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             flushInterval: skeletonConfig.flushInterval,
             batchSize: skeletonConfig.flushBatchSize
         )
+        self.readRecorder = nil
         self.isTestClient = true
         self.anonymousKeyStore = UserDefaultsAnonymousKeyStore()
         self._currentContext = skeletonConfig.context
         lock.withLock {
             _initialized = true
         }
+    }
+
+    /// Builds the read recorder, or nothing when read reporting is off.
+    ///
+    /// Nil rather than a no-op recorder, so "off" cannot leak a single event and costs a
+    /// read one nil check. `config.sendEvaluationEvents` is also what the inits pass to
+    /// `HttpClient` as `reportsEvaluations`, so the header and the reporting cannot disagree.
+    private static func makeReadRecorder(
+        config: FeatureflipConfig,
+        context: [String: AnyCodableValue],
+        eventProcessor: EventProcessor,
+        sink: (@Sendable (SdkEvent) -> Void)?
+    ) -> ReadRecorder? {
+        guard config.sendEvaluationEvents else { return nil }
+        return ReadRecorder(
+            userId: reportedUserId(context),
+            // Only a first-in-window read gets here, so this is one Task per new read,
+            // never one per read.
+            sink: sink ?? { event in
+                Task { await eventProcessor.enqueue(event) }
+            }
+        )
+    }
+
+    /// The `user_id` events are reported for: the context's, after anonymous-id
+    /// resolution. `track()` and read reporting both use this, so they always agree.
+    /// Context values are AnyCodableValue since #2293; displayString keeps an absent id
+    /// nil and renders a numeric id.
+    static func reportedUserId(_ context: [String: AnyCodableValue]) -> String? {
+        context["user_id"]?.displayString
     }
 
     // MARK: - Lifecycle
@@ -269,6 +357,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         if let flag = flag, case .bool(let v) = flag.value {
             value = v
         }
+        recordRead(key, flag)
         notifyInspectors(key, flag, .bool(value))
         return value
     }
@@ -280,6 +369,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         if let flag = flag, case .string(let v) = flag.value {
             value = v
         }
+        recordRead(key, flag)
         notifyInspectors(key, flag, .string(value))
         return value
     }
@@ -295,6 +385,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             default: break
             }
         }
+        recordRead(key, flag)
         notifyInspectors(key, flag, .double(value))
         return value
     }
@@ -303,8 +394,28 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     func jsonVariation(_ key: String, default defaultValue: AnyCodableValue) -> AnyCodableValue {
         let flag = getFlag(key)
         let value = flag?.value ?? defaultValue
+        recordRead(key, flag)
         notifyInspectors(key, flag, value)
         return value
+    }
+
+    /// Returns a flag's full detail and reports the read. App code reaches this through
+    /// `FeatureflipClient.flagDetail`; `getFlag` stays the unreported internal accessor.
+    func flagDetail(_ key: String) -> FlagValue? {
+        let flag = getFlag(key)
+        recordRead(key, flag)
+        return flag
+    }
+
+    /// Reports a read of `key`. `flag` is nil when the key is absent from the snapshot
+    /// (unknown, archived, or not yet fetched), and that read is still reported, with no
+    /// variation: an old build reading a removed flag must stay visible.
+    ///
+    /// Hot path: called on every variation. It must not take `lock` or build anything;
+    /// the recorder caches the user id for exactly that reason.
+    @inline(__always)
+    private func recordRead(_ key: String, _ flag: FlagValue?) {
+        readRecorder?.record(flagKey: key, variation: flag?.variation)
     }
 
     /// Fire the registered inspectors. Called once per variation call, after
@@ -360,6 +471,12 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         // Update current context and data sources
         let (stream, poller): (StreamingDataSource?, PollingDataSource?) = lock.withLock {
             _currentContext = resolved
+            // The only place the resolved user can change after init. Reads made while the
+            // identify request was in flight were reported for the previous user, which they
+            // were. Set under the core lock so overlapping identify calls cannot leave the
+            // recorder on a different user than _currentContext. The lock order core lock ->
+            // recorder lock cannot deadlock: the recorder never takes the core's lock.
+            readRecorder?.setUserId(SharedFeatureflipCore.reportedUserId(resolved))
             return (streamingDataSource, pollingDataSource)
         }
         stream?.updateContext(resolved)
@@ -372,9 +489,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     func track(_ eventName: String, metadata: [String: AnyCodableValue]? = nil) {
         guard !isTestClient else { return }
 
-        // Context values are AnyCodableValue since #2293; SdkEvent.userId is String?.
-        // displayString keeps an absent id nil and renders a numeric id.
-        let userId = lock.withLock { _currentContext["user_id"]?.displayString }
+        let userId = lock.withLock { SharedFeatureflipCore.reportedUserId(_currentContext) }
 
         let event = SdkEvent(
             type: "Custom",
@@ -405,6 +520,10 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     }
 
     /// Returns all current flag values.
+    ///
+    /// Never reports reads. It hands back every flag at once, so counting it would mark
+    /// every served flag as read in any app that calls it (a debug screen, say), and the
+    /// flags nothing reads could never be archived.
     func allFlags() -> [String: FlagValue] {
         snapshotLock.withLock { flagSnapshot }
     }
@@ -564,6 +683,10 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     }
 
     func handleForeground() {
+        // A resumed session's first reads are reported even if the platform clock paused
+        // while the app was away. CLOCK_MONOTONIC counts through sleep on Darwin, so this is
+        // defence in depth, and it matches the other client SDKs.
+        readRecorder?.resetWindow()
         let stream: StreamingDataSource? = lock.withLock { streamingDataSource }
         stream?.start()
         // Re-read under the lock rather than reusing a value captured alongside the
@@ -587,12 +710,7 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     // MARK: - Shutdown (called by release() at refcount zero)
 
     private func shutdown() {
-        // Remove from cache
-        _liveCoresLock.withLock {
-            if _liveCores[config.clientKey] === self {
-                _liveCores.removeValue(forKey: config.clientKey)
-            }
-        }
+        removeFromLiveCores()
         // Stop data sources (idempotent if close() already called)
         lock.withLock {
             streamingDataSource?.stop()
@@ -603,6 +721,15 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         }
         Task {
             await eventProcessor.stop()
+        }
+    }
+
+    /// Drops this core from the clientKey cache, unless a newer core already replaced it.
+    private func removeFromLiveCores() {
+        _liveCoresLock.withLock {
+            if _liveCores[config.clientKey] === self {
+                _liveCores.removeValue(forKey: config.clientKey)
+            }
         }
     }
 

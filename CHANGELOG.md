@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.3.0 — 2026-10-07
+
+### Added
+
+- The SDK now tells Featureflip which flags your app actually reads. Each typed variation call (`boolVariation`, `stringVariation`, `numberVariation`, `jsonVariation`) and `flagDetail` reports an `Evaluation` event through the queue `track()` already uses, about once per flag, variation and user per hour on each device, and again each time the app returns to the foreground. A read of a flag the device does not have is reported too, with no variation. Until now the server recorded every flag it sent a device as evaluated, so a client-side flag whose code had been removed still looked live on every launch and could never be archived. `/v1/client/evaluate` and `/v1/client/identify` now send `X-Featureflip-Reports-Evaluations: 1`, which tells the server to stop doing that for this client. ([#3545](https://github.com/canopy-labs/featureflip/issues/3545))
+- `FeatureflipConfig(sendEvaluationEvents:)`, default `true`. Set it to `false` to report no reads and send no header. The server then goes back to recording every flag it serves this client, so none of them can be archived while the app is in use. Like every other option, it is honored on the first client created for a `clientKey`. ([#3545](https://github.com/canopy-labs/featureflip/issues/3545))
+
+### Changed
+
+- Evaluation counts for client-side flags change meaning, from one per served flag per app launch to deduplicated reads. Expect a visible drop as your apps upgrade.
+- Client-side flags that are served but never read can now show as stale. On plans with stale-flag notices, upgrading can produce a burst of them. They are accurate.
+
+### Fixed
+
+- Closing one of two clients created with the same `clientKey` no longer stops the other. The surviving client used to stop receiving flag updates and drop every event, including the reads it reports, so flags it still used could look unused and become archivable. `close()` now flushes and releases its own client; the shared connection and event queue stop when the last client closes. ([#3566](https://github.com/canopy-labs/featureflip/issues/3566))
+
 ## 3.2.1 — 2026-09-19
 
 ### Fixed

@@ -96,4 +96,73 @@ final class HttpClientTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    // MARK: - X-Featureflip-Reports-Evaluations
+
+    private func makeClient(_ loader: MockHTTPLoader, reportsEvaluations: Bool) -> HttpClient {
+        HttpClient(
+            baseUrl: "https://eval.example.com",
+            clientKey: "csk_test123",
+            loader: loader,
+            reportsEvaluations: reportsEvaluations
+        )
+    }
+
+    private let emptyFlags = #"{"flags":{}}"#.data(using: .utf8)!
+
+    func testEvaluateAndIdentifySendTheReportsHeaderWhenReportingIsOn() async throws {
+        let loader = MockHTTPLoader()
+        loader.enqueue(statusCode: 200, body: emptyFlags)
+        loader.enqueue(statusCode: 200, body: emptyFlags)
+        let client = makeClient(loader, reportsEvaluations: true)
+
+        _ = try await client.evaluate(context: ["user_id": "u1"])
+        _ = try await client.identify(context: ["user_id": "u1"])
+
+        let requests = loader.captured
+        XCTAssertEqual(requests.map { $0.url?.path }, ["/v1/client/evaluate", "/v1/client/identify"])
+        for request in requests {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Featureflip-Reports-Evaluations"), "1")
+        }
+    }
+
+    func testEvaluateAndIdentifyOmitTheReportsHeaderWhenReportingIsOff() async throws {
+        // Off must mean no header: the server then records every flag it serves, which
+        // is the only thing keeping a non-reporting client's flags protected.
+        let loader = MockHTTPLoader()
+        loader.enqueue(statusCode: 200, body: emptyFlags)
+        loader.enqueue(statusCode: 200, body: emptyFlags)
+        let client = makeClient(loader, reportsEvaluations: false)
+
+        _ = try await client.evaluate(context: ["user_id": "u1"])
+        _ = try await client.identify(context: ["user_id": "u1"])
+
+        for request in loader.captured {
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Featureflip-Reports-Evaluations"))
+        }
+    }
+
+    func testTheReportsHeaderIsOffByDefault() async throws {
+        let loader = MockHTTPLoader()
+        loader.enqueue(statusCode: 200, body: emptyFlags)
+        let client = HttpClient(baseUrl: "https://eval.example.com", clientKey: "csk_test123", loader: loader)
+
+        _ = try await client.evaluate(context: ["user_id": "u1"])
+
+        XCTAssertNil(loader.captured[0].value(forHTTPHeaderField: "X-Featureflip-Reports-Evaluations"))
+    }
+
+    func testPostEventsNeverSendsTheReportsHeader() async throws {
+        let loader = MockHTTPLoader()
+        loader.enqueue(statusCode: 202, body: Data())
+        let client = makeClient(loader, reportsEvaluations: true)
+
+        try await client.postEvents([
+            SdkEvent(type: "Evaluation", flagKey: "f", userId: "u1", variation: "on",
+                     timestamp: "2026-10-07T00:00:00Z", metadata: nil),
+        ])
+
+        XCTAssertEqual(loader.captured[0].url?.path, "/v1/client/events")
+        XCTAssertNil(loader.captured[0].value(forHTTPHeaderField: "X-Featureflip-Reports-Evaluations"))
+    }
 }

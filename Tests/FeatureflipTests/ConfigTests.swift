@@ -11,6 +11,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.flushBatchSize, 100)
         XCTAssertEqual(config.initTimeout, 10)
         XCTAssertTrue(config.context.isEmpty)
+        XCTAssertTrue(config.sendEvaluationEvents, "read reporting is on unless the app turns it off")
     }
 
     func testCustomValues() {
@@ -22,10 +23,12 @@ final class ConfigTests: XCTestCase {
             pollInterval: 60,
             flushInterval: 15,
             flushBatchSize: 50,
-            initTimeout: 5
+            initTimeout: 5,
+            sendEvaluationEvents: false
         )
         XCTAssertEqual(config.baseUrl, "https://custom.example.com")
         XCTAssertFalse(config.streaming)
         XCTAssertEqual(config.pollInterval, 60)
+        XCTAssertFalse(config.sendEvaluationEvents)
     }
 }

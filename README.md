@@ -46,7 +46,8 @@ let config = FeatureflipConfig(
     pollInterval: 30,                              // Polling interval in seconds
     flushInterval: 30,                             // Event flush interval in seconds
     flushBatchSize: 100,                           // Events per batch
-    initTimeout: 10                                // Max seconds to wait for initialization
+    initTimeout: 10,                               // Max seconds to wait for initialization
+    sendEvaluationEvents: true                     // Report which flags the app reads (default)
 )
 ```
 
@@ -65,6 +66,18 @@ let limit = client.numberVariation("rate-limit", default: 100.0)
 // JSON flag
 let config = client.jsonVariation("ui-config", default: .object(["theme": .string("light")]))
 ```
+
+## Read reporting
+
+The SDK tells Featureflip which flags your app reads, so a client-side flag your code no longer uses can be archived while one it still reads stays protected. The typed variation methods and `flagDetail` count as reads. Each flag, variation and user is reported about once an hour per device, and again each time the app returns to the foreground, through the same event queue `track()` uses.
+
+To turn it off:
+
+```swift
+let config = FeatureflipConfig(clientKey: "your-client-sdk-key", sendEvaluationEvents: false)
+```
+
+With it off, Featureflip counts every flag it sends the app as read, so none of them can be archived while the app is in use.
 
 ## Identify
 

@@ -75,7 +75,8 @@ public final class FeatureflipClient: @unchecked Sendable {
     }
 
     /// Flushes pending events and releases this handle's reference to the shared core.
-    /// The core shuts down only when the last handle releases.
+    /// The core shuts down only when the last handle releases; other handles on the
+    /// same `clientKey` keep updating and reporting reads (#3566).
     public func close() async {
         let alreadyClosed: Bool = closeLock.withLock {
             if closed { return true }
@@ -83,16 +84,15 @@ public final class FeatureflipClient: @unchecked Sendable {
             return false
         }
         guard !alreadyClosed else { return }
-        await core.close()
-        core.release()
+        await core.closeHandle()
     }
 
     // MARK: - Variation methods
     //
     // A closed handle serves the caller's default (#2327, contract from #2313).
-    // close() releases the core — stopping streaming/polling and flushing events —
-    // but the in-memory snapshot stays readable, so without these guards the handle
-    // would keep serving a frozen snapshot that can never update again.
+    // close() gives up this handle's share of the core, but the core's in-memory
+    // snapshot stays readable — frozen for good if this was the last handle — so
+    // without these guards a closed handle would keep serving flags.
 
     public func boolVariation(_ key: String, default defaultValue: Bool) -> Bool {
         guard !isClosed else { return defaultValue }
@@ -117,9 +117,11 @@ public final class FeatureflipClient: @unchecked Sendable {
     /// Returns the full evaluation detail for a flag (value, variation, reason, prerequisiteKey),
     /// or `nil` if the flag is not present in the current snapshot. Mirrors the
     /// `flagDetail` accessor on the browser and Android SDKs.
+    ///
+    /// Counts as a read of the flag, like the typed variation methods.
     public func flagDetail(_ key: String) -> FlagValue? {
         guard !isClosed else { return nil }
-        return core.getFlag(key)
+        return core.flagDetail(key)
     }
 
     // MARK: - Identify
@@ -167,6 +169,8 @@ public final class FeatureflipClient: @unchecked Sendable {
 
     /// Returns all current flag values, or an empty dictionary once closed — the
     /// bulk-read analogue of a variation falling back to its default.
+    ///
+    /// Not a read: see `SharedFeatureflipCore.allFlags()`.
     internal func allFlags() -> [String: FlagValue] {
         guard !isClosed else { return [:] }
         return core.allFlags()

@@ -91,10 +91,9 @@ actor EventProcessor {
         // trigger never fires for it and no drain ever comes. Rejecting at the door
         // loses the same events far more visibly.
         //
-        // This does mean one handle closing silences analytics for other handles
-        // sharing the same refcounted core. That is a lifecycle bug in
-        // SharedFeatureflipCore.close(), which stops the processor for every handle
-        // rather than only at refcount zero, and it is tracked separately.
+        // Only the last handle on a shared core stops its processor
+        // (`SharedFeatureflipCore.closeHandle()`), so nothing a live handle records
+        // lands here (#3566).
         guard !closed else { return }
 
         buffer.append(event)

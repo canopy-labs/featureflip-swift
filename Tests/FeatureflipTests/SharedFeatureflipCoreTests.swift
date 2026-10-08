@@ -128,4 +128,41 @@ final class SharedFeatureflipCoreTests: XCTestCase {
 
         core.release()
     }
+
+    func testClosingOneOfTwoHandlesKeepsTheSharedDataSourceRunning() async {
+        let loader = MockHTTPLoader()
+        // The poller's immediate first poll.
+        loader.enqueue(statusCode: 200, body: #"{"flags":{}}"#.data(using: .utf8)!)
+        let config = FeatureflipConfig(
+            clientKey: "close-one-of-two",
+            baseUrl: "https://localhost",
+            streaming: false,
+            pollInterval: 300
+        )
+        let first = _getOrCreateCore(config: config, loader: loader)
+        let second = _getOrCreateCore(config: config, loader: loader)
+        XCTAssertTrue(first === second)
+        first.startDataSource()
+        XCTAssertTrue(first.hasPollingSource)
+
+        await first.closeHandle()
+
+        XCTAssertTrue(
+            second.hasPollingSource,
+            "closing one handle must not stop the data source the other still uses (#3566)"
+        )
+        XCTAssertFalse(second.isShutDown)
+        XCTAssertEqual(second.refCount, 1)
+        let third = _getOrCreateCore(config: config, loader: loader)
+        XCTAssertTrue(third === second, "the core must stay cached while a handle holds it")
+        third.release()
+
+        await second.closeHandle()
+
+        XCTAssertFalse(second.hasPollingSource, "the last handle stops the data source")
+        XCTAssertTrue(second.isShutDown)
+        let fresh = _getOrCreateCore(config: config, loader: loader)
+        XCTAssertFalse(fresh === second, "a shut-down core must leave the cache")
+        fresh.release()
+    }
 }
