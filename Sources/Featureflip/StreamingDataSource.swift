@@ -34,6 +34,8 @@ final class StreamingDataSource: @unchecked Sendable {
     // drive the retry cap without waiting out the real 1s-and-doubling schedule —
     // mirrors the android source's `initialBackoffMs` parameter.
     private let baseBackoff: TimeInterval
+    /// Sent on every connect (#4142); the core passes the HTTP client's value.
+    private let userAgent: String
     private var backoff: TimeInterval
     private var retryCount = 0
     // True between arming the polling fallback and the next delivered frame. Gates
@@ -55,7 +57,8 @@ final class StreamingDataSource: @unchecked Sendable {
         onSnapshot: @escaping @Sendable ([String: FlagValue]) -> Void,
         onFallbackToPolling: (@Sendable () -> Void)? = nil,
         onStreamRecovered: (@Sendable () -> Void)? = nil,
-        initialBackoff: TimeInterval = StreamingDataSource.initialBackoff
+        initialBackoff: TimeInterval = StreamingDataSource.initialBackoff,
+        userAgent: String = SdkIdentity.userAgent()
     ) {
         self.baseUrl = baseUrl
         self.clientKey = clientKey
@@ -66,6 +69,7 @@ final class StreamingDataSource: @unchecked Sendable {
         self.onStreamRecovered = onStreamRecovered
         self.baseBackoff = initialBackoff
         self.backoff = initialBackoff
+        self.userAgent = userAgent
     }
 
     func start() {
@@ -226,14 +230,22 @@ final class StreamingDataSource: @unchecked Sendable {
         }
     }
 
-    private func connect() async throws {
+    /// The connect request for the current context. Split out of `connect()` so its
+    /// headers can be asserted without opening a stream.
+    func makeStreamRequest() -> URLRequest? {
         lock.lock()
         let currentContext = context
         lock.unlock()
 
-        guard let url = Self.buildStreamURL(baseUrl: baseUrl, clientKey: clientKey, context: currentContext) else { return }
+        guard let url = Self.buildStreamURL(baseUrl: baseUrl, clientKey: clientKey, context: currentContext) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        return request
+    }
+
+    private func connect() async throws {
+        guard let request = makeStreamRequest() else { return }
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }

@@ -122,7 +122,8 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
         self.httpClient = HttpClient(
             baseUrl: config.baseUrl,
             clientKey: config.clientKey,
-            reportsEvaluations: config.sendEvaluationEvents
+            reportsEvaluations: config.sendEvaluationEvents,
+            userAgent: SdkIdentity.userAgent(wrapperName: config.wrapperName, wrapperVersion: config.wrapperVersion)
         )
         self.cache = FlagCache(clientKey: config.clientKey)
         let processor = EventProcessor(
@@ -158,7 +159,8 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
             baseUrl: config.baseUrl,
             clientKey: config.clientKey,
             loader: loader,
-            reportsEvaluations: config.sendEvaluationEvents
+            reportsEvaluations: config.sendEvaluationEvents,
+            userAgent: SdkIdentity.userAgent(wrapperName: config.wrapperName, wrapperVersion: config.wrapperVersion)
         )
         self.cache = FlagCache(clientKey: config.clientKey)
         let processor = EventProcessor(
@@ -584,7 +586,8 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
                 },
                 onStreamRecovered: { [weak self] in
                     self?.stopFallbackPolling()
-                }
+                },
+                userAgent: httpClient.userAgent
             )
             source.start()
             lock.withLock {

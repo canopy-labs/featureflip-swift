@@ -28,6 +28,14 @@ public struct FeatureflipConfig: Sendable {
     ///
     /// Honored on the first client created per `clientKey`, like every other option.
     public let sendEvaluationEvents: Bool
+    /// Name of a library that wraps this SDK (a React Native or Flutter bridge, an
+    /// internal platform client). Sent after the SDK's own token in the User-Agent
+    /// (`featureflip-swift/<version> my-wrapper/1.0.0`) so usage through the wrapper can
+    /// be counted. Must be a valid HTTP product token; an invalid one is ignored with a
+    /// diagnostic. Leave unset when calling the SDK directly.
+    public let wrapperName: String?
+    /// Version of the wrapper named by `wrapperName`. Optional.
+    public let wrapperVersion: String?
 
     public init(
         clientKey: String,
@@ -39,7 +47,9 @@ public struct FeatureflipConfig: Sendable {
         flushBatchSize: Int = 100,
         initTimeout: TimeInterval = 10,
         inspectors: [EvaluationInspector] = [],
-        sendEvaluationEvents: Bool = true
+        sendEvaluationEvents: Bool = true,
+        wrapperName: String? = nil,
+        wrapperVersion: String? = nil
     ) {
         self.clientKey = clientKey
         self.baseUrl = baseUrl
@@ -53,5 +63,7 @@ public struct FeatureflipConfig: Sendable {
         self.initTimeout = initTimeout
         self.inspectors = inspectors
         self.sendEvaluationEvents = sendEvaluationEvents
+        self.wrapperName = wrapperName
+        self.wrapperVersion = wrapperVersion
     }
 }

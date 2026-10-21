@@ -11,6 +11,9 @@ final class HttpClient: Sendable {
     private let clientKey: String
     private let loader: HTTPDataLoader
     private let reportsEvaluations: Bool
+    /// Sent on every request (#4142). The core builds it from the config and hands the
+    /// same value to the stream, which runs on its own URLSession call.
+    let userAgent: String
 
     /// Tells the server this client reports the flags it reads as `Evaluation` events,
     /// so it stops recording every flag it serves on the client's behalf. Sent only on
@@ -24,12 +27,14 @@ final class HttpClient: Sendable {
         baseUrl: String,
         clientKey: String,
         loader: HTTPDataLoader = URLSession.shared,
-        reportsEvaluations: Bool = false
+        reportsEvaluations: Bool = false,
+        userAgent: String = SdkIdentity.userAgent()
     ) {
         self.baseUrl = baseUrl
         self.clientKey = clientKey
         self.loader = loader
         self.reportsEvaluations = reportsEvaluations
+        self.userAgent = userAgent
     }
 
     func evaluate(context: [String: AnyCodableValue], timeout: TimeInterval? = nil) async throws -> EvaluateResponse {
@@ -92,6 +97,8 @@ final class HttpClient: Sendable {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(clientKey, forHTTPHeaderField: "Authorization")
+        // Per request: Apple documents httpAdditionalHeaders as not guaranteed for User-Agent.
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         if reportsEvaluations {
             request.setValue("1", forHTTPHeaderField: Self.reportsEvaluationsHeader)
         }

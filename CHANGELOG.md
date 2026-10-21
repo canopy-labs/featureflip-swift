@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.4.0 — 2026-10-20
+
+### Added
+
+- Every request now sends `User-Agent: featureflip-swift/<version>`, on evaluate, identify, event posts and the SSE stream alike. The SDK previously sent URLSession's default `<App>/<build> CFNetwork/<x> Darwin/<y>`, which names the host app rather than the SDK, so Swift usage could not be counted. The header is set per request, because Apple documents `httpAdditionalHeaders` as not guaranteed for `User-Agent`. ([#4142](https://github.com/canopy-labs/featureflip/issues/4142))
+- `FeatureflipConfig` gains `wrapperName` and `wrapperVersion`, for libraries that wrap this SDK, such as a React Native or Flutter bridge. The wrapper's token follows the SDK's, e.g. `featureflip-swift/<version> my-wrapper/1.0.0`. An invalid token is ignored with a diagnostic rather than failing construction. ([#4142](https://github.com/canopy-labs/featureflip/issues/4142))
+
 ## 3.3.0 — 2026-10-07
 
 ### Added
