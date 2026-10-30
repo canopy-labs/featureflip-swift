@@ -7,7 +7,7 @@ enum SdkIdentity {
     /// maintained by hand and held equal to CHANGELOG.md's newest heading by
     /// tools/check-sdk-versions (CI workflow sdk-version-consistency.yml). Bump both
     /// together, as with the Go and PHP SDKs.
-    static let version = "3.4.0"
+    static let version = "3.4.1"
 
     /// The SDK token, then the wrapper's token when one is configured. A wrapper that is
     /// not a valid product token is dropped with a diagnostic rather than thrown, because

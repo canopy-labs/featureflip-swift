@@ -268,7 +268,9 @@ internal final class SharedFeatureflipCore: @unchecked Sendable {
     /// Context values are AnyCodableValue since #2293; displayString keeps an absent id
     /// nil and renders a numeric id.
     static func reportedUserId(_ context: [String: AnyCodableValue]) -> String? {
-        context["user_id"]?.displayString
+        // `user_id` if present and non-null, else the `userId` alias. `.null` is a non-nil
+        // optional, so the fallback goes on displayString (nil for `.null`), not on the lookup.
+        context["user_id"]?.displayString ?? context["userId"]?.displayString
     }
 
     // MARK: - Lifecycle

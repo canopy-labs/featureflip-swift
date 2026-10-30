@@ -272,6 +272,72 @@ final class FeatureflipClientTests: XCTestCase {
         XCTAssertEqual(event["userId"] as? String, "user-123")
     }
 
+    /// Tracks one event on a client built with `context` and returns the posted event's userId.
+    private func trackedUserId(context: [String: AnyCodableValue]) async throws -> String? {
+        let loader = MockHTTPLoader()
+        let flags: [String: FlagValue] = [
+            "test-flag": makeFlagValue(bool: true),
+        ]
+        // For initialize() evaluate call
+        loader.enqueue(statusCode: 200, body: makeEvaluateResponseData(flags: flags))
+        // For polling data source initial poll
+        loader.enqueue(statusCode: 200, body: makeEvaluateResponseData(flags: flags))
+
+        let config = FeatureflipConfig(
+            clientKey: "test-key",
+            baseUrl: "https://test.example.com",
+            context: context,
+            streaming: false
+        )
+        let client = FeatureflipClient(config: config, loader: loader)
+        await client.initialize()
+
+        // Enqueue response for events POST
+        loader.enqueue(statusCode: 202, body: Data())
+
+        client.track("checkout-completed")
+        await Task.yield()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await client.flush()
+        await client.close()
+
+        let deadline = Date().addingTimeInterval(2.0)
+        var eventsRequest: URLRequest?
+        while eventsRequest == nil && Date() < deadline {
+            eventsRequest = loader.captured.first { req in
+                req.url?.path.contains("events") == true
+            }
+            if eventsRequest == nil {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+
+        let request = try XCTUnwrap(eventsRequest, "Expected an events POST request")
+        let body = try XCTUnwrap(request.httpBody, "Expected request body")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let events = try XCTUnwrap(json["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 1)
+        return events[0]["userId"] as? String
+    }
+
+    func testTrackReportsUserIdWhenOnlyUserIdIsSet() async throws {
+        let userId = try await trackedUserId(context: ["userId": "u1"])
+        XCTAssertEqual(userId, "u1")
+    }
+
+    func testTrackPrefersUserIdOverUserIdAlias() async throws {
+        let userId = try await trackedUserId(context: ["user_id": "a", "userId": "b"])
+        XCTAssertEqual(userId, "a")
+    }
+
+    func testReportedUserIdFallsBackToUserIdWhenUserIdIsNull() {
+        XCTAssertEqual(SharedFeatureflipCore.reportedUserId(["user_id": nil, "userId": "u1"]), "u1")
+    }
+
+    func testReportedUserIdTreatsEmptyUserIdAsAValue() {
+        XCTAssertEqual(SharedFeatureflipCore.reportedUserId(["user_id": "", "userId": "b"]), "")
+    }
+
     // MARK: - SSE Delta Merge Tests
 
     func testHandleFlagUpdateMergesDeltaIntoSnapshot() async {
